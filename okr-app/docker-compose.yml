@@ -1,0 +1,27 @@
+services:
+  okr:
+    build: .
+    container_name: okr-tracker
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist database
+      - okr-data:/app/data
+    environment:
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/okr.db
+      # Fitbit OAuth (optional - add your credentials)
+      # - FITBIT_CLIENT_ID=your_client_id
+      # - FITBIT_CLIENT_SECRET=your_client_secret
+      # - PUBLIC_BASE_URL=https://okr.example.com
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/auth/me"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  okr-data:
+    driver: local

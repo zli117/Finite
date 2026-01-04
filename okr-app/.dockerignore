@@ -1,0 +1,43 @@
+# Dependencies
+node_modules
+
+# Build output
+build
+.svelte-kit
+
+# Development files
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__
+
+# Database files (will be created in volume)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Temporary files
+*.log
+*.tmp
+.cache

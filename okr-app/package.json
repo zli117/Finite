@@ -1,0 +1,39 @@
+{
+	"name": "okr-app",
+	"private": true,
+	"version": "0.0.1",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"db:generate": "drizzle-kit generate",
+		"db:migrate": "drizzle-kit migrate",
+		"db:push": "drizzle-kit push",
+		"db:studio": "drizzle-kit studio"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/kit": "^2.49.1",
+		"@sveltejs/vite-plugin-svelte": "^6.2.1",
+		"@types/bcrypt": "^6.0.0",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/uuid": "^10.0.0",
+		"drizzle-kit": "^0.31.8",
+		"svelte": "^5.45.6",
+		"svelte-check": "^4.3.4",
+		"typescript": "^5.9.3",
+		"vite": "^7.2.6"
+	},
+	"dependencies": {
+		"@sveltejs/adapter-node": "^5.4.0",
+		"bcrypt": "^6.0.0",
+		"better-sqlite3": "^12.5.0",
+		"drizzle-orm": "^0.45.1",
+		"quickjs-emscripten": "^0.31.0",
+		"uuid": "^13.0.0"
+	}
+}

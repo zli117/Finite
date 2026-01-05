@@ -42,6 +42,7 @@ export interface PlotlyData {
 export interface QueryResult {
 	result: unknown;
 	renders: RenderOutput[];
+	progressValue?: number; // Set via progress.set(value)
 	error?: string;
 }
 
@@ -75,12 +76,20 @@ export async function executeQuery(
 	// Collect render outputs
 	const renders: RenderOutput[] = [];
 
+	// Track progress value (set via progress.set())
+	let progressValue: number | undefined = undefined;
+
 	try {
 		// Build the query API and inject it into the context
 		await injectQueryAPI(context, userId);
 
 		// Inject the render API
 		injectRenderAPI(context, renders);
+
+		// Inject the progress API
+		injectProgressAPI(context, (value) => {
+			progressValue = value;
+		});
 
 		// Inject params
 		const paramsHandle = jsonToHandle(context, params);
@@ -99,7 +108,7 @@ export async function executeQuery(
 		if (result.error) {
 			const errorMessage = context.dump(result.error);
 			result.error.dispose();
-			return { result: null, renders: [], error: String(errorMessage) };
+			return { result: null, renders: [], error: extractErrorMessage(errorMessage) };
 		}
 
 		// Handle promise result
@@ -123,17 +132,18 @@ export async function executeQuery(
 		if (resolvedResult.error) {
 			const errorMessage = context.dump(resolvedResult.error);
 			resolvedResult.error.dispose();
-			return { result: null, renders, error: String(errorMessage) };
+			return { result: null, renders, error: extractErrorMessage(errorMessage) };
 		}
 
 		const finalResult = context.dump(resolvedResult.value);
 		resolvedResult.value.dispose();
 
-		return { result: finalResult, renders };
+		return { result: finalResult, renders, progressValue };
 	} catch (error) {
 		return {
 			result: null,
 			renders,
+			progressValue,
 			error: error instanceof Error ? error.message : 'Query execution failed'
 		};
 	} finally {
@@ -141,6 +151,32 @@ export async function executeQuery(
 		context.dispose();
 		runtime.dispose();
 	}
+}
+
+/**
+ * Extract error message from QuickJS dumped error object
+ */
+function extractErrorMessage(error: unknown): string {
+	if (typeof error === 'string') {
+		return error;
+	}
+	if (error && typeof error === 'object') {
+		// QuickJS errors are dumped as objects with message, name, stack properties
+		const errObj = error as { message?: string; name?: string; stack?: string };
+		if (errObj.message) {
+			return errObj.message;
+		}
+		if (errObj.name) {
+			return errObj.name;
+		}
+		// Try JSON stringify as fallback
+		try {
+			return JSON.stringify(error);
+		} catch {
+			return 'Unknown error';
+		}
+	}
+	return String(error);
 }
 
 /**
@@ -455,6 +491,30 @@ function injectRenderAPI(context: QuickJSContext, renders: RenderOutput[]) {
 	// Set render on global
 	context.setProp(context.global, 'render', renderHandle);
 	renderHandle.dispose();
+}
+
+/**
+ * Inject the progress API for setting KR progress values
+ */
+function injectProgressAPI(context: QuickJSContext, onProgressSet: (value: number) => void) {
+	const progressHandle = context.newObject();
+
+	// progress.set(value) - Set the progress value (0-1)
+	const setFn = context.newFunction('set', (valueHandle) => {
+		const value = context.dump(valueHandle) as number;
+		if (typeof value === 'number' && !isNaN(value)) {
+			// Clamp to 0-1 range
+			const clampedValue = Math.max(0, Math.min(1, value));
+			onProgressSet(clampedValue);
+		}
+		return context.undefined;
+	});
+	context.setProp(progressHandle, 'set', setFn);
+	setFn.dispose();
+
+	// Set progress on global
+	context.setProp(context.global, 'progress', progressHandle);
+	progressHandle.dispose();
 }
 
 /**

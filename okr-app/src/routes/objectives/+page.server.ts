@@ -2,7 +2,7 @@ import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db/client';
 import { objectives, keyResults, savedQueries } from '$lib/db/schema';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 
 export const load: PageServerLoad = async ({ locals, url, depends }) => {
 	// Register dependency for invalidation
@@ -61,12 +61,9 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 		? objectivesWithKRs.reduce((sum, obj) => sum + obj.averageScore * obj.weight, 0) / totalWeight
 		: 0;
 
-	// Get progress queries for the selector
-	const progressQueries = await db.query.savedQueries.findMany({
-		where: and(
-			eq(savedQueries.userId, locals.user.id),
-			eq(savedQueries.queryType, 'progress')
-		)
+	// Get all saved queries for the progress query selector
+	const allSavedQueries = await db.query.savedQueries.findMany({
+		where: eq(savedQueries.userId, locals.user.id)
 	});
 
 	// Get distinct years that have objectives for this user
@@ -95,6 +92,6 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 		objectives: objectivesWithKRs,
 		overallScore,
 		years: availableYears,
-		progressQueries: progressQueries.map(q => ({ id: q.id, name: q.name, code: q.code }))
+		savedQueries: allSavedQueries.map(q => ({ id: q.id, name: q.name, code: q.code }))
 	};
 };

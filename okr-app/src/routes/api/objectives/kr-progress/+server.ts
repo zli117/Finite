@@ -67,14 +67,14 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 					return;
 				}
 
-				// Validate the result is a number between 0 and 1
-				const score = queryResult.result;
-				if (typeof score !== 'number' || isNaN(score)) {
-					results[krId] = { score: null, error: 'Query must return a number' };
+				// Check if progress.set() was called
+				if (queryResult.progressValue === undefined) {
+					results[krId] = { score: null, error: 'Query must call progress.set(value)' };
 					return;
 				}
 
-				const clampedScore = Math.max(0, Math.min(1, score));
+				// progressValue is already clamped to 0-1 by the executor
+				const clampedScore = queryResult.progressValue;
 
 				// Update the KR score in database
 				await db.update(keyResults)

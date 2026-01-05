@@ -305,6 +305,16 @@
 		border-bottom: none;
 	}
 
+	.task-checkbox {
+		width: 18px;
+		height: 18px;
+		margin: 0;
+		margin-top: 2px;
+		flex-shrink: 0;
+		cursor: pointer;
+		accent-color: var(--color-primary);
+	}
+
 	.task-content {
 		flex: 1;
 		min-width: 0;

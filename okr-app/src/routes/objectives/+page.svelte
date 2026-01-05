@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto, invalidateAll } from '$app/navigation';
 	import KRWidget from '$lib/components/KRWidget.svelte';
+	import MonacoEditor from '$lib/components/MonacoEditor.svelte';
 
 	let { data } = $props();
 
@@ -279,7 +280,7 @@
 	function selectProgressQuery(queryId: string | null) {
 		krProgressQueryId = queryId;
 		if (queryId) {
-			const query = data.progressQueries.find(q => q.id === queryId);
+			const query = data.savedQueries.find(q => q.id === queryId);
 			if (query) {
 				krProgressQueryCode = query.code;
 			}
@@ -740,28 +741,23 @@
 				{#if krMeasurementType === 'custom_query'}
 					<div class="form-group">
 						<label class="label">Progress Query</label>
-						<p class="form-hint">Select a saved progress query or write custom code that returns a value between 0 and 1.</p>
+						<p class="form-hint">Write code that calls <code>progress.set(value)</code> with a value between 0 and 1.</p>
 
-						{#if data.progressQueries.length > 0}
+						{#if data.savedQueries.length > 0}
 							<div class="query-selector">
 								<select class="input" value={krProgressQueryId || ''} onchange={(e) => selectProgressQuery(e.currentTarget.value || null)}>
 									<option value="">-- Custom code (below) --</option>
-									{#each data.progressQueries as query}
+									{#each data.savedQueries as query}
 										<option value={query.id}>{query.name}</option>
 									{/each}
 								</select>
 							</div>
 						{/if}
 
-						<textarea
-							id="kr-query"
-							class="input code-textarea"
-							placeholder="// Return a value between 0 and 1
-const tasks = await q.tasks(&#123; tag: 'MyTag' &#125;);
-if (tasks.length === 0) return 0;
-return tasks.filter(t => t.completed).length / tasks.length;"
+						<MonacoEditor
 							bind:value={krProgressQueryCode}
-						></textarea>
+							height="150px"
+						/>
 					</div>
 				{/if}
 
@@ -1189,14 +1185,6 @@ return tasks.filter(t => t.completed).length / tasks.length;"
 
 	.checkbox-editor-item .input {
 		flex: 1;
-	}
-
-	/* Code textarea */
-	.code-textarea {
-		min-height: 120px;
-		font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
-		font-size: 0.875rem;
-		resize: vertical;
 	}
 
 	/* Form hint */

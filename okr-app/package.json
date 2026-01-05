@@ -34,8 +34,10 @@
 		"better-sqlite3": "^12.5.0",
 		"drizzle-orm": "^0.45.1",
 		"marked": "^17.0.1",
+		"monaco-editor": "^0.55.1",
 		"plotly.js-basic-dist-min": "^3.3.1",
 		"quickjs-emscripten": "^0.31.0",
-		"uuid": "^13.0.0"
+		"uuid": "^13.0.0",
+		"vite-plugin-monaco-editor": "^1.1.0"
 	}
 }

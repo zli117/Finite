@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { marked } from 'marked';
+	import MonacoEditor from './MonacoEditor.svelte';
 
 	interface RenderOutput {
 		type: 'markdown' | 'table' | 'plotly';
@@ -177,12 +178,10 @@
 				</select>
 			{/if}
 
-			<textarea
-				class="input code-editor"
+			<MonacoEditor
 				bind:value={localCode}
-				placeholder={"// Query code using render API\n// render.markdown('# Hello')\n// render.table({ headers: [...], rows: [...] })\n// render.plot.bar({ x: [...], y: [...] })"}
-				rows="8"
-			></textarea>
+				height="200px"
+			/>
 
 			<div class="help-text">
 				<strong>Render API:</strong>
@@ -295,12 +294,6 @@
 
 	.btn-danger:hover {
 		opacity: 0.9;
-	}
-
-	.code-editor {
-		font-family: monospace;
-		font-size: 0.8rem;
-		resize: vertical;
 	}
 
 	.help-text {

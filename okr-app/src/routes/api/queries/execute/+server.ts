@@ -22,7 +22,11 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: result.error }, { status: 400 });
 		}
 
-		return json({ result: result.result, renders: result.renders });
+		return json({
+			result: result.result,
+			renders: result.renders,
+			progressValue: result.progressValue
+		});
 	} catch (error) {
 		console.error('Error executing query:', error);
 		return json({ error: 'Failed to execute query' }, { status: 500 });

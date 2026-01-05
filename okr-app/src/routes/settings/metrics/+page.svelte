@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import type { MetricDefinition } from '$lib/db/schema';
+	import MonacoEditor from '$lib/components/MonacoEditor.svelte';
 
 	let { data } = $props();
 
@@ -14,8 +15,9 @@
 	let effectiveFrom = $state(new Date().toISOString().split('T')[0]);
 	let metrics = $state<MetricDefinition[]>([]);
 
-	// New metric form
-	let showAddMetric = $state(false);
+	// New/edit metric form
+	let showMetricForm = $state(false);
+	let editingMetricIndex = $state<number | null>(null);
 	let newMetricName = $state('');
 	let newMetricLabel = $state('');
 	let newMetricType = $state<'input' | 'computed' | 'external'>('input');
@@ -40,7 +42,8 @@
 		newMetricUnit = '';
 		newMetricExpression = '';
 		newMetricSource = '';
-		showAddMetric = false;
+		showMetricForm = false;
+		editingMetricIndex = null;
 	}
 
 	function openEditTemplate(template: typeof data.templates[0]) {
@@ -51,7 +54,24 @@
 		showNewTemplate = true;
 	}
 
-	function addMetric() {
+	function openEditMetric(index: number) {
+		const metric = metrics[index];
+		editingMetricIndex = index;
+		newMetricName = metric.name;
+		newMetricLabel = metric.label;
+		newMetricType = metric.type;
+		if (metric.type === 'input') {
+			newMetricInputType = metric.inputType || 'number';
+			newMetricUnit = metric.unit || '';
+		} else if (metric.type === 'computed') {
+			newMetricExpression = metric.expression || '';
+		} else if (metric.type === 'external') {
+			newMetricSource = metric.source || '';
+		}
+		showMetricForm = true;
+	}
+
+	function saveMetric() {
 		if (!newMetricName.trim() || !newMetricLabel.trim()) return;
 
 		const metric: MetricDefinition = {
@@ -69,7 +89,13 @@
 			metric.source = newMetricSource;
 		}
 
-		metrics = [...metrics, metric];
+		if (editingMetricIndex !== null) {
+			// Update existing metric
+			metrics = metrics.map((m, i) => i === editingMetricIndex ? metric : m);
+		} else {
+			// Add new metric
+			metrics = [...metrics, metric];
+		}
 		resetMetricForm();
 	}
 
@@ -237,6 +263,16 @@
 								</div>
 								<button
 									type="button"
+									class="btn-icon btn-icon-edit"
+									onclick={() => openEditMetric(index)}
+									title="Edit metric"
+								>
+									<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+										<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3Z"/>
+									</svg>
+								</button>
+								<button
+									type="button"
 									class="btn-icon"
 									onclick={() => removeMetric(index)}
 									title="Remove metric"
@@ -248,8 +284,9 @@
 					<p class="empty-state">No metrics defined yet. Add your first metric below.</p>
 				{/if}
 
-				{#if showAddMetric}
+				{#if showMetricForm}
 					<div class="add-metric-form">
+						<h4>{editingMetricIndex !== null ? 'Edit Metric' : 'Add Metric'}</h4>
 						<div class="form-row">
 							<div class="form-group">
 								<label class="label" for="metric-name">ID (unique)</label>
@@ -289,13 +326,10 @@
 						{:else if newMetricType === 'computed'}
 							<div class="form-group">
 								<label class="label" for="expression">Expression</label>
-								<textarea
-									id="expression"
-									class="input code-textarea"
-									placeholder="// Reference other metrics with metrics.name
-// Example: metrics.sleep_hours >= 7 ? 'Good' : 'Poor'"
+								<MonacoEditor
 									bind:value={newMetricExpression}
-								></textarea>
+									height="120px"
+								/>
 								<p class="help-text">JavaScript expression. Access other metrics via <code>metrics.name</code>. Use <code>q.parseTime()</code> for time conversions.</p>
 							</div>
 						{:else if newMetricType === 'external'}
@@ -322,13 +356,13 @@
 							<button
 								type="button"
 								class="btn btn-primary btn-sm"
-								onclick={addMetric}
+								onclick={saveMetric}
 								disabled={!newMetricName.trim() || !newMetricLabel.trim() || (newMetricType === 'external' && !newMetricSource)}
-							>Add Metric</button>
+							>{editingMetricIndex !== null ? 'Save Changes' : 'Add Metric'}</button>
 						</div>
 					</div>
 				{:else}
-					<button type="button" class="btn btn-secondary" onclick={() => showAddMetric = true}>
+					<button type="button" class="btn btn-secondary" onclick={() => showMetricForm = true}>
 						+ Add Metric
 					</button>
 				{/if}
@@ -553,11 +587,19 @@
 		margin-bottom: var(--spacing-md);
 	}
 
-	.code-textarea {
-		min-height: 80px;
-		font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+	.add-metric-form h4 {
+		margin: 0 0 var(--spacing-md);
 		font-size: 0.875rem;
-		resize: vertical;
+		font-weight: 600;
+	}
+
+	.btn-icon-edit {
+		color: var(--color-text-muted);
+	}
+
+	.btn-icon-edit:hover {
+		background-color: var(--color-bg-hover);
+		color: var(--color-primary);
 	}
 
 	.help-text {

@@ -2,6 +2,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { tick } from 'svelte';
 	import { marked } from 'marked';
+	import MonacoEditor from '$lib/components/MonacoEditor.svelte';
 
 	interface RenderOutput {
 		type: 'markdown' | 'table' | 'plotly';
@@ -20,43 +21,30 @@
 
 	let { data } = $props();
 
-	// Query type filter and selection
-	type QueryTypeFilter = 'all' | 'progress' | 'widget' | 'general';
-	type QueryType = 'progress' | 'widget' | 'general';
-	let selectedTypeFilter = $state<QueryTypeFilter>('all');
-	let queryType = $state<QueryType>('general');
-
 	// Plotly containers for charts
 	let plotContainers: Record<number, HTMLDivElement> = {};
 
-	// Filtered queries based on selected type
-	const filteredQueries = $derived(
-		selectedTypeFilter === 'all'
-			? data.savedQueries
-			: data.savedQueries.filter(q => q.queryType === selectedTypeFilter)
-	);
-
-	// Sample code templates for each query type
-	const sampleCode: Record<QueryType, string> = {
-		general: `// General Query - Use render API to display results
-// Available methods:
-//   q.daily({ year, month, week, from, to })
-//   q.tasks({ year, tag, completed })
-//   q.objectives({ year, level })
+	// Sample code showing all APIs
+	const sampleCode = `// Query Playground - Write JavaScript to analyze your data
 //
-// Render API:
-//   render.markdown(text) - Render markdown
-//   render.table({ headers, rows }) - Render table
-//   render.plot.bar/line/pie/multi(opts) - Render Plotly charts
+// Data Fetching:
+//   q.daily({ year, month, week, from, to }) - Daily records with metrics
+//   q.tasks({ year, tag, completed }) - Tasks with attributes
+//   q.objectives({ year, level }) - Objectives with key results
+//
+// Output (Render API):
+//   render.markdown(text) - Render markdown content
+//   render.table({ headers, rows }) - Render a table
+//   render.plot.bar/line/pie/multi(opts) - Render charts
+//
+// Progress (for Key Results):
+//   progress.set(value) - Set progress value (0 to 1)
 
-// Example: Show sleep data with table and chart
+// Example: Show recent sleep data
 const days = await q.daily({ year: 2025, month: 1 });
-
 const sleepData = days.filter(d => d.sleepLength).slice(-7);
-const avgSleep = q.avg(sleepData.map(d => q.parseTime(d.sleepLength)));
 
-render.markdown(\`## Sleep Analysis
-Average: **\${q.formatDuration(avgSleep)}**\`);
+render.markdown('## Recent Sleep');
 
 render.table({
   headers: ['Date', 'Sleep Duration'],
@@ -66,70 +54,26 @@ render.table({
 render.plot.bar({
   x: sleepData.map(d => d.date),
   y: sleepData.map(d => q.parseTime(d.sleepLength) / 60),
-  name: 'Hours of Sleep'
-});`,
-		progress: `// Progress Query - Return a number between 0 and 1
-// Used for Key Result progress tracking
-//
-// Examples:
-// - Task completion rate: completed / total
-// - Habit streak: daysCompleted / targetDays
-// - Reading goal: booksRead / targetBooks
-
-// Example: Calculate progress for tasks with a specific tag
-const tasks = await q.tasks({ tag: 'Read_Books', year: 2025 });
-
-if (tasks.length === 0) return 0;
-
-const completed = tasks.filter(t => t.completed).length;
-return completed / tasks.length; // Returns 0.0 to 1.0`,
-		widget: `// Widget Query - Use render API for custom display
-//
-// Render API:
-//   render.markdown(text) - Markdown with tables, lists, etc.
-//   render.table({ headers, rows }) - Structured table
-//   render.plot.bar/line/pie(opts) - Plotly charts
-
-// Example: Dashboard with steps chart
-const days = await q.daily({ year: 2025, month: 1 });
-const recent = days.filter(d => d.steps).slice(-7);
-
-render.markdown('### Weekly Steps');
-
-render.plot.line({
-  x: recent.map(d => d.date),
-  y: recent.map(d => d.steps),
-  name: 'Steps'
+  title: 'Hours of Sleep'
 });
 
-const total = q.sum(recent, 'steps');
-render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
-	};
+// For Key Results, use progress.set():
+// const tasks = await q.tasks({ tag: 'My_Goal', year: 2025 });
+// const completed = tasks.filter(t => t.completed).length;
+// progress.set(completed / tasks.length);`;
 
-	let code = $state(sampleCode.general);
+	let code = $state(sampleCode);
 
-	// Track if the user has modified the code (to avoid overwriting their work)
-	let codeModified = $state(false);
-
-	function setQueryTypeWithSample(type: QueryType) {
-		// Only update sample code if creating new query and code hasn't been modified
-		if (!selectedQuery && !codeModified) {
-			code = sampleCode[type];
-		}
-		queryType = type;
-	}
-
-	function startNewQuery(type: QueryType) {
+	function startNewQuery() {
 		selectedQuery = null;
 		queryName = '';
 		queryDescription = '';
-		queryType = type;
-		code = sampleCode[type];
-		codeModified = false;
+		code = sampleCode;
 	}
 
 	let result = $state<unknown>(null);
 	let renders = $state<RenderOutput[]>([]);
+	let progressValue = $state<number | undefined>(undefined);
 	let error = $state('');
 	let loading = $state(false);
 
@@ -147,6 +91,7 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 		error = '';
 		result = null;
 		renders = [];
+		progressValue = undefined;
 		plotContainers = {};
 
 		try {
@@ -164,6 +109,7 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 
 			result = responseData.result;
 			renders = responseData.renders || [];
+			progressValue = responseData.progressValue;
 
 			// Render Plotly charts after DOM update
 			await tick();
@@ -214,7 +160,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 				body: JSON.stringify({
 					name: queryName.trim(),
 					description: queryDescription.trim() || null,
-					queryType,
 					code
 				})
 			});
@@ -226,7 +171,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 
 			queryName = '';
 			queryDescription = '';
-			queryType = 'general';
 			showSaveForm = false;
 			await invalidateAll();
 		} catch (err) {
@@ -248,7 +192,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 				body: JSON.stringify({
 					name: queryName.trim(),
 					description: queryDescription.trim() || null,
-					queryType,
 					code
 				})
 			});
@@ -261,7 +204,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 			selectedQuery = null;
 			queryName = '';
 			queryDescription = '';
-			queryType = 'general';
 			await invalidateAll();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to update query';
@@ -296,7 +238,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 		selectedQuery = query;
 		queryName = query.name;
 		queryDescription = query.description || '';
-		queryType = (query.queryType as QueryType) || 'general';
 	}
 
 	function formatResult(value: unknown): string {
@@ -325,7 +266,7 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 					<h2>Code Editor</h2>
 					<div class="editor-actions">
 						{#if selectedQuery}
-							<button class="btn btn-secondary btn-sm" onclick={() => startNewQuery('general')}>
+							<button class="btn btn-secondary btn-sm" onclick={startNewQuery}>
 								New Query
 							</button>
 							<button class="btn btn-primary btn-sm" onclick={updateQuery} disabled={saveLoading}>
@@ -341,27 +282,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 						</button>
 					</div>
 				</div>
-
-				{#if !selectedQuery}
-					<div class="new-query-type-tabs">
-						<span class="type-label">New:</span>
-						<button
-							class="type-tab"
-							class:active={queryType === 'general'}
-							onclick={() => startNewQuery('general')}
-						>General</button>
-						<button
-							class="type-tab"
-							class:active={queryType === 'progress'}
-							onclick={() => startNewQuery('progress')}
-						>Progress (0-1)</button>
-						<button
-							class="type-tab"
-							class:active={queryType === 'widget'}
-							onclick={() => startNewQuery('widget')}
-						>Widget (Markdown)</button>
-					</div>
-				{/if}
 
 				{#if showSaveForm && !selectedQuery}
 					<div class="save-form">
@@ -383,72 +303,69 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 					</div>
 				{/if}
 
-				{#if selectedQuery}
-					<div class="edit-type-row">
-						<label>Type:</label>
-						<select class="input type-select" bind:value={queryType}>
-							<option value="general">General</option>
-							<option value="progress">Progress (0-1)</option>
-							<option value="widget">Widget (Markdown)</option>
-						</select>
-					</div>
-				{/if}
-
-				<textarea
-					class="code-editor"
+				<MonacoEditor
 					bind:value={code}
-					oninput={() => codeModified = true}
-					spellcheck="false"
-					placeholder="Write your query here..."
-				></textarea>
+					height="400px"
+				/>
 			</div>
 
 			<div class="card result-card">
 				<h2>Result</h2>
 				{#if loading}
 					<p class="text-muted">Running query...</p>
-				{:else if renders.length > 0}
-					<div class="renders">
-						{#each renders as render, index}
-							{#if render.type === 'markdown'}
-								<div class="render-markdown">
-									{@html renderMarkdown(render.content as string)}
+				{:else if progressValue !== undefined || renders.length > 0 || result !== null}
+					{#if progressValue !== undefined}
+						<div class="progress-result">
+							<h3>Progress Value</h3>
+							<div class="progress-display">
+								<div class="progress-bar">
+									<div class="progress-fill" style="width: {progressValue * 100}%"></div>
 								</div>
-							{:else if render.type === 'table'}
-								{@const tableData = render.content as TableData}
-								<div class="render-table">
-									<table>
-										<thead>
-											<tr>
-												{#each tableData.headers as header}
-													<th>{header}</th>
-												{/each}
-											</tr>
-										</thead>
-										<tbody>
-											{#each tableData.rows as row}
+								<span class="progress-value">{(progressValue * 100).toFixed(1)}%</span>
+							</div>
+						</div>
+					{/if}
+					{#if renders.length > 0}
+						<div class="renders">
+							{#each renders as render, index}
+								{#if render.type === 'markdown'}
+									<div class="render-markdown">
+										{@html renderMarkdown(render.content as string)}
+									</div>
+								{:else if render.type === 'table'}
+									{@const tableData = render.content as TableData}
+									<div class="render-table">
+										<table>
+											<thead>
 												<tr>
-													{#each row as cell}
-														<td>{cell}</td>
+													{#each tableData.headers as header}
+														<th>{header}</th>
 													{/each}
 												</tr>
-											{/each}
-										</tbody>
-									</table>
-								</div>
-							{:else if render.type === 'plotly'}
-								<div class="render-plotly" bind:this={plotContainers[index]}></div>
-							{/if}
-						{/each}
-					</div>
+											</thead>
+											<tbody>
+												{#each tableData.rows as row}
+													<tr>
+														{#each row as cell}
+															<td>{cell}</td>
+														{/each}
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								{:else if render.type === 'plotly'}
+									<div class="render-plotly" bind:this={plotContainers[index]}></div>
+								{/if}
+							{/each}
+						</div>
+					{/if}
 					{#if result !== null && result !== undefined}
 						<div class="return-value">
 							<h3>Return Value</h3>
 							<pre class="result-output">{formatResult(result)}</pre>
 						</div>
 					{/if}
-				{:else if result !== null}
-					<pre class="result-output">{formatResult(result)}</pre>
 				{:else}
 					<p class="text-muted">Run a query to see results</p>
 				{/if}
@@ -459,42 +376,14 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 			<div class="card">
 				<h2>Saved Queries</h2>
 
-				<div class="type-tabs">
-					<button
-						class="type-tab"
-						class:active={selectedTypeFilter === 'all'}
-						onclick={() => selectedTypeFilter = 'all'}
-					>All</button>
-					<button
-						class="type-tab"
-						class:active={selectedTypeFilter === 'progress'}
-						onclick={() => selectedTypeFilter = 'progress'}
-					>Progress</button>
-					<button
-						class="type-tab"
-						class:active={selectedTypeFilter === 'widget'}
-						onclick={() => selectedTypeFilter = 'widget'}
-					>Widget</button>
-					<button
-						class="type-tab"
-						class:active={selectedTypeFilter === 'general'}
-						onclick={() => selectedTypeFilter = 'general'}
-					>General</button>
-				</div>
-
-				{#if filteredQueries.length === 0}
-					<p class="text-muted">No {selectedTypeFilter === 'all' ? '' : selectedTypeFilter + ' '}queries yet</p>
+				{#if data.savedQueries.length === 0}
+					<p class="text-muted">No saved queries yet</p>
 				{:else}
 					<ul class="saved-queries-list">
-						{#each filteredQueries as query}
+						{#each data.savedQueries as query}
 							<li class:active={selectedQuery?.id === query.id}>
 								<button class="query-item" onclick={() => loadQuery(query)}>
-									<div class="query-header">
-										<span class="query-name">{query.name}</span>
-										<span class="query-type-badge" class:type-progress={query.queryType === 'progress'} class:type-widget={query.queryType === 'widget'}>
-											{query.queryType || 'general'}
-										</span>
-									</div>
+									<span class="query-name">{query.name}</span>
 									{#if query.description}
 										<span class="query-desc">{query.description}</span>
 									{/if}
@@ -520,26 +409,27 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 				<div class="api-docs">
 					<h3>Render API</h3>
 					<code>render.markdown(text)</code>
-					<p>Render markdown text (supports tables, lists, etc.)</p>
+					<p>Render markdown text</p>
 
 					<code>render.table(&#123; headers, rows &#125;)</code>
 					<p>Render a structured table</p>
 
-					<code>render.plot.bar(&#123; x, y, name &#125;)</code>
-					<code>render.plot.line(&#123; x, y, name &#125;)</code>
-					<code>render.plot.pie(&#123; labels, values &#125;)</code>
-					<code>render.plot.multi([&#123;...&#125;])</code>
+					<code>render.plot.bar/line/pie/multi(...)</code>
 					<p>Render Plotly charts</p>
 
-					<h3>Data Fetching</h3>
-					<code>q.daily(&#123; year, month, week, from, to &#125;)</code>
-					<p>Get daily records with metrics and tasks</p>
+					<h3>Progress API</h3>
+					<code>progress.set(value)</code>
+					<p>Set KR progress (0-1)</p>
 
-					<code>q.tasks(&#123; year, tag, completed &#125;)</code>
-					<p>Get tasks with attributes and tags</p>
+					<h3>Data Fetching</h3>
+					<code>q.daily(&#123; year, month, ... &#125;)</code>
+					<p>Get daily records</p>
+
+					<code>q.tasks(&#123; year, tag, ... &#125;)</code>
+					<p>Get tasks with attributes</p>
 
 					<code>q.objectives(&#123; year, level &#125;)</code>
-					<p>Get objectives with key results</p>
+					<p>Get objectives with KRs</p>
 
 					<h3>Helpers</h3>
 					<code>q.sum(items, 'field')</code>
@@ -547,7 +437,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 					<code>q.count(items)</code>
 					<code>q.parseTime('7:30')</code>
 					<code>q.formatDuration(450)</code>
-					<code>q.formatPercent(3, 10)</code>
 				</div>
 			</div>
 		</div>
@@ -630,129 +519,6 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 
 	.save-form .input {
 		flex: 1;
-	}
-
-	.save-form .type-select {
-		flex: 0 0 auto;
-		width: auto;
-		min-width: 120px;
-	}
-
-	.edit-type-row {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-sm);
-		padding: var(--spacing-sm);
-		background-color: var(--color-bg);
-		border-radius: var(--radius-sm);
-	}
-
-	.edit-type-row label {
-		font-size: 0.875rem;
-		color: var(--color-text-muted);
-	}
-
-	.edit-type-row .type-select {
-		flex: 1;
-	}
-
-	.new-query-type-tabs {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-sm);
-		padding: var(--spacing-sm);
-		background-color: var(--color-bg);
-		border-radius: var(--radius-sm);
-	}
-
-	.new-query-type-tabs .type-label {
-		font-size: 0.75rem;
-		color: var(--color-text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-
-	.new-query-type-tabs .type-tab {
-		flex: none;
-		padding: var(--spacing-xs) var(--spacing-sm);
-		font-size: 0.75rem;
-	}
-
-	.type-tabs {
-		display: flex;
-		gap: 2px;
-		margin-bottom: var(--spacing-md);
-		background-color: var(--color-bg);
-		border-radius: var(--radius-sm);
-		padding: 2px;
-	}
-
-	.type-tab {
-		flex: 1;
-		padding: var(--spacing-xs) var(--spacing-sm);
-		border: none;
-		background: transparent;
-		font-size: 0.75rem;
-		cursor: pointer;
-		border-radius: var(--radius-sm);
-		color: var(--color-text-muted);
-		transition: all 0.15s ease;
-	}
-
-	.type-tab:hover {
-		color: var(--color-text);
-	}
-
-	.type-tab.active {
-		background-color: var(--color-surface);
-		color: var(--color-text);
-		box-shadow: var(--shadow-sm);
-	}
-
-	.query-header {
-		display: flex;
-		align-items: center;
-		gap: var(--spacing-xs);
-	}
-
-	.query-type-badge {
-		font-size: 0.625rem;
-		padding: 1px 6px;
-		border-radius: var(--radius-sm);
-		background-color: var(--color-bg);
-		color: var(--color-text-muted);
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-
-	.query-type-badge.type-progress {
-		background-color: rgb(59 130 246 / 0.15);
-		color: rgb(59 130 246);
-	}
-
-	.query-type-badge.type-widget {
-		background-color: rgb(139 92 246 / 0.15);
-		color: rgb(139 92 246);
-	}
-
-	.code-editor {
-		width: 100%;
-		min-height: 400px;
-		padding: var(--spacing-md);
-		font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
-		font-size: 0.875rem;
-		line-height: 1.5;
-		background-color: #1e1e1e;
-		color: #d4d4d4;
-		border: none;
-		border-radius: var(--radius-md);
-		resize: vertical;
-		tab-size: 2;
-	}
-
-	.code-editor:focus {
-		outline: 2px solid var(--color-primary);
-		outline-offset: -2px;
 	}
 
 	.result-card h2 {
@@ -890,6 +656,47 @@ render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 		margin: 0 0 var(--spacing-sm);
 		color: var(--color-text-muted);
 		font-size: 0.75rem;
+	}
+
+	/* Progress result styles */
+	.progress-result {
+		margin-bottom: var(--spacing-md);
+		padding-bottom: var(--spacing-md);
+		border-bottom: 1px solid var(--color-border);
+	}
+
+	.progress-result h3 {
+		margin: 0 0 var(--spacing-sm);
+		font-size: 0.875rem;
+		color: var(--color-text-muted);
+	}
+
+	.progress-display {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-md);
+	}
+
+	.progress-bar {
+		flex: 1;
+		height: 24px;
+		background-color: var(--color-bg);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+	}
+
+	.progress-fill {
+		height: 100%;
+		background-color: var(--color-primary);
+		border-radius: var(--radius-md);
+		transition: width 0.3s ease;
+	}
+
+	.progress-value {
+		font-size: 1.25rem;
+		font-weight: 600;
+		min-width: 70px;
+		text-align: right;
 	}
 
 	/* Render output styles */

@@ -7,6 +7,44 @@ import { eq, and, gte, lte, between } from 'drizzle-orm';
 const EXECUTION_TIMEOUT_MS = 5000;
 const MAX_MEMORY_BYTES = 128 * 1024 * 1024; // 128MB
 
+// Render output types
+export interface RenderOutput {
+	type: 'markdown' | 'table' | 'plotly';
+	content: unknown;
+}
+
+export interface TableData {
+	headers: string[];
+	rows: (string | number)[][];
+}
+
+export interface PlotlyData {
+	data: Array<{
+		type: string;
+		x?: (string | number)[];
+		y?: (string | number)[];
+		values?: number[];
+		labels?: string[];
+		name?: string;
+		mode?: string;
+		marker?: { color?: string | string[] };
+		[key: string]: unknown;
+	}>;
+	layout?: {
+		title?: string;
+		xaxis?: { title?: string };
+		yaxis?: { title?: string };
+		barmode?: string;
+		[key: string]: unknown;
+	};
+}
+
+export interface QueryResult {
+	result: unknown;
+	renders: RenderOutput[];
+	error?: string;
+}
+
 /**
  * Execute user-defined JavaScript code in a sandboxed QuickJS environment
  * with access to the Query API for fetching OKR data
@@ -15,7 +53,7 @@ export async function executeQuery(
 	code: string,
 	userId: string,
 	params: Record<string, unknown> = {}
-): Promise<{ result: unknown; error?: string }> {
+): Promise<QueryResult> {
 	const QuickJS = await getQuickJS();
 	const runtime = QuickJS.newRuntime();
 
@@ -34,9 +72,15 @@ export async function executeQuery(
 
 	const context = runtime.newContext();
 
+	// Collect render outputs
+	const renders: RenderOutput[] = [];
+
 	try {
 		// Build the query API and inject it into the context
 		await injectQueryAPI(context, userId);
+
+		// Inject the render API
+		injectRenderAPI(context, renders);
 
 		// Inject params
 		const paramsHandle = jsonToHandle(context, params);
@@ -55,7 +99,7 @@ export async function executeQuery(
 		if (result.error) {
 			const errorMessage = context.dump(result.error);
 			result.error.dispose();
-			return { result: null, error: String(errorMessage) };
+			return { result: null, renders: [], error: String(errorMessage) };
 		}
 
 		// Handle promise result
@@ -79,16 +123,17 @@ export async function executeQuery(
 		if (resolvedResult.error) {
 			const errorMessage = context.dump(resolvedResult.error);
 			resolvedResult.error.dispose();
-			return { result: null, error: String(errorMessage) };
+			return { result: null, renders, error: String(errorMessage) };
 		}
 
 		const finalResult = context.dump(resolvedResult.value);
 		resolvedResult.value.dispose();
 
-		return { result: finalResult };
+		return { result: finalResult, renders };
 	} catch (error) {
 		return {
 			result: null,
+			renders,
 			error: error instanceof Error ? error.message : 'Query execution failed'
 		};
 	} finally {
@@ -259,6 +304,157 @@ function addHelperFunctions(context: QuickJSContext, qHandle: QuickJSHandle) {
 	});
 	context.setProp(qHandle, 'parseTime', parseTimeFn);
 	parseTimeFn.dispose();
+}
+
+/**
+ * Inject the render API for outputting markdown, tables, and plots
+ */
+function injectRenderAPI(context: QuickJSContext, renders: RenderOutput[]) {
+	const renderHandle = context.newObject();
+
+	// render.markdown(text)
+	const markdownFn = context.newFunction('markdown', (textHandle) => {
+		const text = context.dump(textHandle) as string;
+		renders.push({ type: 'markdown', content: text });
+		return context.undefined;
+	});
+	context.setProp(renderHandle, 'markdown', markdownFn);
+	markdownFn.dispose();
+
+	// render.table({ headers: [...], rows: [...] })
+	const tableFn = context.newFunction('table', (dataHandle) => {
+		const data = context.dump(dataHandle) as TableData;
+		renders.push({ type: 'table', content: data });
+		return context.undefined;
+	});
+	context.setProp(renderHandle, 'table', tableFn);
+	tableFn.dispose();
+
+	// Create render.plot object with chart helpers
+	const plotHandle = context.newObject();
+
+	// render.plot.bar({ x, y, title?, xLabel?, yLabel?, color? })
+	const barFn = context.newFunction('bar', (optsHandle) => {
+		const opts = context.dump(optsHandle) as {
+			x: (string | number)[];
+			y: number[];
+			title?: string;
+			xLabel?: string;
+			yLabel?: string;
+			color?: string;
+		};
+		const plotData: PlotlyData = {
+			data: [{
+				type: 'bar',
+				x: opts.x,
+				y: opts.y,
+				marker: opts.color ? { color: opts.color } : undefined
+			}],
+			layout: {
+				title: opts.title,
+				xaxis: opts.xLabel ? { title: opts.xLabel } : undefined,
+				yaxis: opts.yLabel ? { title: opts.yLabel } : undefined
+			}
+		};
+		renders.push({ type: 'plotly', content: plotData });
+		return context.undefined;
+	});
+	context.setProp(plotHandle, 'bar', barFn);
+	barFn.dispose();
+
+	// render.plot.line({ x, y, title?, xLabel?, yLabel?, color? })
+	const lineFn = context.newFunction('line', (optsHandle) => {
+		const opts = context.dump(optsHandle) as {
+			x: (string | number)[];
+			y: number[];
+			title?: string;
+			xLabel?: string;
+			yLabel?: string;
+			color?: string;
+		};
+		const plotData: PlotlyData = {
+			data: [{
+				type: 'scatter',
+				mode: 'lines+markers',
+				x: opts.x,
+				y: opts.y,
+				marker: opts.color ? { color: opts.color } : undefined
+			}],
+			layout: {
+				title: opts.title,
+				xaxis: opts.xLabel ? { title: opts.xLabel } : undefined,
+				yaxis: opts.yLabel ? { title: opts.yLabel } : undefined
+			}
+		};
+		renders.push({ type: 'plotly', content: plotData });
+		return context.undefined;
+	});
+	context.setProp(plotHandle, 'line', lineFn);
+	lineFn.dispose();
+
+	// render.plot.pie({ values, labels, title? })
+	const pieFn = context.newFunction('pie', (optsHandle) => {
+		const opts = context.dump(optsHandle) as {
+			values: number[];
+			labels: string[];
+			title?: string;
+		};
+		const plotData: PlotlyData = {
+			data: [{
+				type: 'pie',
+				values: opts.values,
+				labels: opts.labels
+			}],
+			layout: {
+				title: opts.title
+			}
+		};
+		renders.push({ type: 'plotly', content: plotData });
+		return context.undefined;
+	});
+	context.setProp(plotHandle, 'pie', pieFn);
+	pieFn.dispose();
+
+	// render.plot.multi({ series, title?, xLabel?, yLabel? }) - multiple line series
+	const multiFn = context.newFunction('multi', (optsHandle) => {
+		const opts = context.dump(optsHandle) as {
+			series: Array<{
+				x: (string | number)[];
+				y: number[];
+				name: string;
+				color?: string;
+			}>;
+			title?: string;
+			xLabel?: string;
+			yLabel?: string;
+		};
+		const plotData: PlotlyData = {
+			data: opts.series.map(s => ({
+				type: 'scatter',
+				mode: 'lines+markers',
+				x: s.x,
+				y: s.y,
+				name: s.name,
+				marker: s.color ? { color: s.color } : undefined
+			})),
+			layout: {
+				title: opts.title,
+				xaxis: opts.xLabel ? { title: opts.xLabel } : undefined,
+				yaxis: opts.yLabel ? { title: opts.yLabel } : undefined
+			}
+		};
+		renders.push({ type: 'plotly', content: plotData });
+		return context.undefined;
+	});
+	context.setProp(plotHandle, 'multi', multiFn);
+	multiFn.dispose();
+
+	context.setProp(renderHandle, 'plot', plotHandle);
+	plotHandle.dispose();
+
+	// Set render on global
+	context.setProp(context.global, 'render', renderHandle);
+	renderHandle.dispose();
 }
 
 /**

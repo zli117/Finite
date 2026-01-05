@@ -1,6 +1,6 @@
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db/client';
-import { timePeriods, tasks, taskAttributes, objectives, keyResults } from '$lib/db/schema';
+import { timePeriods, tasks, taskAttributes, objectives, keyResults, dashboardWidgets, savedQueries } from '$lib/db/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import {
 	getWeekNumber,
@@ -143,6 +143,20 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 		})
 	);
 
+	// Load dashboard widgets
+	const widgets = await db.query.dashboardWidgets.findMany({
+		where: and(
+			eq(dashboardWidgets.userId, locals.user.id),
+			eq(dashboardWidgets.page, 'dashboard')
+		),
+		orderBy: (w, { asc }) => [asc(w.sortOrder)]
+	});
+
+	// Load saved queries for widget selector
+	const queries = await db.query.savedQueries.findMany({
+		where: eq(savedQueries.userId, locals.user.id)
+	});
+
 	return {
 		user: locals.user,
 		today: {
@@ -160,6 +174,18 @@ export const load: PageServerLoad = async ({ locals, depends }) => {
 		yearlyObjectives: yearlyObjectivesWithKRs,
 		monthlyObjectives: monthlyObjectivesWithKRs,
 		currentMonth,
-		currentYear
+		currentYear,
+		widgets: widgets.map(w => ({
+			id: w.id,
+			title: w.title,
+			widgetType: w.widgetType,
+			config: JSON.parse(w.config),
+			sortOrder: w.sortOrder
+		})),
+		savedQueries: queries.map(q => ({
+			id: q.id,
+			name: q.name,
+			code: q.code
+		}))
 	};
 };

@@ -1,5 +1,13 @@
 <script lang="ts">
-	import QueryWidget from '$lib/components/QueryWidget.svelte';
+	import DashboardCard from '$lib/components/DashboardCard.svelte';
+
+	interface Widget {
+		id: string;
+		title: string;
+		widgetType: string;
+		config: { code?: string; queryId?: string };
+		sortOrder: number;
+	}
 
 	let { data } = $props();
 
@@ -13,12 +21,16 @@
 	let monthlyObjectives = $state(data.monthlyObjectives || []);
 	let loadingMonthly = $state(false);
 
+	// Dashboard widgets state
+	let widgets = $state<Widget[]>(data.widgets || []);
+
 	// Sync when server data changes
 	$effect(() => {
 		if (data.currentMonth) {
 			selectedMonth = data.currentMonth;
 		}
 		monthlyObjectives = data.monthlyObjectives || [];
+		widgets = data.widgets || [];
 	});
 
 	async function changeMonth(month: number) {
@@ -61,29 +73,55 @@
 		return Math.round((data.week.completedCount / data.week.totalCount) * 100);
 	});
 
-	// Example widget queries
-	const currentYear = data.currentYear || new Date().getFullYear();
-	const currentMonth = data.currentMonth || new Date().getMonth() + 1;
+	async function addWidget() {
+		try {
+			const response = await fetch('/api/dashboard/widgets', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ title: 'New Widget', code: '' })
+			});
 
-	const sleepWidget = `
-const days = await q.daily({ year: ${currentYear}, month: ${currentMonth} });
-const withSleep = days.filter(d => d.sleepLength);
-if (withSleep.length === 0) return { message: "No sleep data" };
-const sleepMinutes = withSleep.map(d => q.parseTime(d.sleepLength));
-const avg = q.avg(sleepMinutes.map((m, i) => ({ m })), 'm');
-return {
-  avg_sleep: q.formatDuration(avg),
-  days_tracked: withSleep.length,
-  good_sleep: sleepMinutes.filter(m => m >= 420).length
-};`;
+			if (response.ok) {
+				const result = await response.json();
+				widgets = [...widgets, result.widget];
+			}
+		} catch (err) {
+			console.error('Failed to add widget:', err);
+		}
+	}
 
-	const tasksWidget = `
-const tasks = await q.tasks({ year: ${currentYear}, completed: true });
-const totalHours = q.sum(tasks, 'hour');
-return {
-  completed: tasks.length,
-  hours: totalHours.toFixed(1) + 'h'
-};`;
+	async function saveWidget(id: string, title: string, code: string) {
+		try {
+			const response = await fetch(`/api/dashboard/widgets/${id}`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ title, code })
+			});
+
+			if (response.ok) {
+				const result = await response.json();
+				widgets = widgets.map(w => w.id === id ? result.widget : w);
+			}
+		} catch (err) {
+			console.error('Failed to save widget:', err);
+		}
+	}
+
+	async function deleteWidget(id: string) {
+		if (!confirm('Delete this widget?')) return;
+
+		try {
+			const response = await fetch(`/api/dashboard/widgets/${id}`, {
+				method: 'DELETE'
+			});
+
+			if (response.ok) {
+				widgets = widgets.filter(w => w.id !== id);
+			}
+		} catch (err) {
+			console.error('Failed to delete widget:', err);
+		}
+	}
 </script>
 
 {#if data.user}
@@ -214,12 +252,29 @@ return {
 		<section class="widgets-section">
 			<div class="widgets-header">
 				<h2>Insights</h2>
-				<a href="/queries" class="btn btn-secondary btn-sm">Create Custom Query</a>
+				<div class="widgets-actions">
+					<button class="btn btn-primary btn-sm" onclick={addWidget}>+ Add Widget</button>
+					<a href="/queries" class="btn btn-secondary btn-sm">Manage Queries</a>
+				</div>
 			</div>
-			<div class="widgets-grid">
-				<QueryWidget title="This Month's Sleep" code={sleepWidget} />
-				<QueryWidget title="Tasks Completed ({currentYear})" code={tasksWidget} />
-			</div>
+			{#if widgets.length > 0}
+				<div class="widgets-grid">
+					{#each widgets as widget (widget.id)}
+						<DashboardCard
+							title={widget.title}
+							code={widget.config.code || ''}
+							savedQueries={data.savedQueries}
+							onSave={(title, code) => saveWidget(widget.id, title, code)}
+							onDelete={() => deleteWidget(widget.id)}
+						/>
+					{/each}
+				</div>
+			{:else}
+				<div class="empty-widgets">
+					<p class="text-muted">No insight widgets yet.</p>
+					<button class="btn btn-primary" onclick={addWidget}>Add your first widget</button>
+				</div>
+			{/if}
 		</section>
 	</main>
 {:else}
@@ -381,10 +436,26 @@ return {
 		margin: 0;
 	}
 
+	.widgets-actions {
+		display: flex;
+		gap: var(--spacing-sm);
+	}
+
 	.widgets-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 		gap: var(--spacing-md);
+	}
+
+	.empty-widgets {
+		text-align: center;
+		padding: var(--spacing-xl);
+		border: 2px dashed var(--color-border);
+		border-radius: var(--radius-md);
+	}
+
+	.empty-widgets p {
+		margin-bottom: var(--spacing-md);
 	}
 
 	.btn-sm {

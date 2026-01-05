@@ -1,5 +1,22 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
+	import { tick } from 'svelte';
+	import { marked } from 'marked';
+
+	interface RenderOutput {
+		type: 'markdown' | 'table' | 'plotly';
+		content: unknown;
+	}
+
+	interface TableData {
+		headers: string[];
+		rows: (string | number)[][];
+	}
+
+	interface PlotlyData {
+		data: unknown[];
+		layout?: Record<string, unknown>;
+	}
 
 	let { data } = $props();
 
@@ -8,6 +25,9 @@
 	type QueryType = 'progress' | 'widget' | 'general';
 	let selectedTypeFilter = $state<QueryTypeFilter>('all');
 	let queryType = $state<QueryType>('general');
+
+	// Plotly containers for charts
+	let plotContainers: Record<number, HTMLDivElement> = {};
 
 	// Filtered queries based on selected type
 	const filteredQueries = $derived(
@@ -18,34 +38,36 @@
 
 	// Sample code templates for each query type
 	const sampleCode: Record<QueryType, string> = {
-		general: `// General Query - Return any data structure
+		general: `// General Query - Use render API to display results
 // Available methods:
 //   q.daily({ year, month, week, from, to })
 //   q.tasks({ year, tag, completed })
 //   q.objectives({ year, level })
 //
-// Helper functions:
-//   q.sum(items, field), q.avg(items, field), q.count(items)
-//   q.parseTime("7:30") -> 450 (minutes)
-//   q.formatDuration(450) -> "7h 30m"
-//   q.formatPercent(3, 10) -> "30%"
+// Render API:
+//   render.markdown(text) - Render markdown
+//   render.table({ headers, rows }) - Render table
+//   render.plot.bar/line/pie/multi(opts) - Render Plotly charts
 
-// Example: Get this month's sleep data
+// Example: Show sleep data with table and chart
 const days = await q.daily({ year: 2025, month: 1 });
 
-const sleepData = days.map(d => ({
-  date: d.date,
-  sleep: d.sleepLength,
-  sleepMinutes: q.parseTime(d.sleepLength || "0:00")
-}));
+const sleepData = days.filter(d => d.sleepLength).slice(-7);
+const avgSleep = q.avg(sleepData.map(d => q.parseTime(d.sleepLength)));
 
-const avgSleep = q.avg(sleepData, 'sleepMinutes');
+render.markdown(\`## Sleep Analysis
+Average: **\${q.formatDuration(avgSleep)}**\`);
 
-return {
-  days: sleepData.length,
-  avgSleep: q.formatDuration(avgSleep),
-  goodSleepDays: sleepData.filter(d => d.sleepMinutes >= 420).length
-};`,
+render.table({
+  headers: ['Date', 'Sleep Duration'],
+  rows: sleepData.map(d => [d.date, d.sleepLength])
+});
+
+render.plot.bar({
+  x: sleepData.map(d => d.date),
+  y: sleepData.map(d => q.parseTime(d.sleepLength) / 60),
+  name: 'Hours of Sleep'
+});`,
 		progress: `// Progress Query - Return a number between 0 and 1
 // Used for Key Result progress tracking
 //
@@ -61,28 +83,27 @@ if (tasks.length === 0) return 0;
 
 const completed = tasks.filter(t => t.completed).length;
 return completed / tasks.length; // Returns 0.0 to 1.0`,
-		widget: `// Widget Query - Return Markdown for custom display
-// Rendered as HTML in Key Result widgets
+		widget: `// Widget Query - Use render API for custom display
 //
-// Supported Markdown:
-// - Tables: | Header | Header |
-// - Lists: - item or 1. item
-// - Bold/Italic: **bold** *italic*
-// - Code: \`inline\` or \`\`\`block\`\`\`
+// Render API:
+//   render.markdown(text) - Markdown with tables, lists, etc.
+//   render.table({ headers, rows }) - Structured table
+//   render.plot.bar/line/pie(opts) - Plotly charts
 
-// Example: Create a table showing daily step counts
+// Example: Dashboard with steps chart
 const days = await q.daily({ year: 2025, month: 1 });
+const recent = days.filter(d => d.steps).slice(-7);
 
-const rows = days
-  .filter(d => d.steps)
-  .slice(-7) // Last 7 days
-  .map(d => \`| \${d.date} | \${d.steps?.toLocaleString() || '-'} |\`)
-  .join('\\n');
+render.markdown('### Weekly Steps');
 
-return \`### Recent Steps
-| Date | Steps |
-|------|-------|
-\${rows}\`;`
+render.plot.line({
+  x: recent.map(d => d.date),
+  y: recent.map(d => d.steps),
+  name: 'Steps'
+});
+
+const total = q.sum(recent, 'steps');
+render.markdown(\`Total: **\${total.toLocaleString()}** steps\`);`
 	};
 
 	let code = $state(sampleCode.general);
@@ -108,6 +129,7 @@ return \`### Recent Steps
 	}
 
 	let result = $state<unknown>(null);
+	let renders = $state<RenderOutput[]>([]);
 	let error = $state('');
 	let loading = $state(false);
 
@@ -124,6 +146,8 @@ return \`### Recent Steps
 		loading = true;
 		error = '';
 		result = null;
+		renders = [];
+		plotContainers = {};
 
 		try {
 			const response = await fetch('/api/queries/execute', {
@@ -132,18 +156,50 @@ return \`### Recent Steps
 				body: JSON.stringify({ code })
 			});
 
-			const data = await response.json();
+			const responseData = await response.json();
 
 			if (!response.ok) {
-				throw new Error(data.error || 'Query failed');
+				throw new Error(responseData.error || 'Query failed');
 			}
 
-			result = data.result;
+			result = responseData.result;
+			renders = responseData.renders || [];
+
+			// Render Plotly charts after DOM update
+			await tick();
+			renderPlotlyCharts();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Query execution failed';
 		} finally {
 			loading = false;
 		}
+	}
+
+	async function renderPlotlyCharts() {
+		if (!renders.some(r => r.type === 'plotly')) return;
+
+		// Dynamically import Plotly only when needed (client-side only)
+		const Plotly = await import('plotly.js-basic-dist-min');
+
+		renders.forEach((render, index) => {
+			if (render.type === 'plotly' && plotContainers[index]) {
+				const plotData = render.content as PlotlyData;
+				Plotly.newPlot(
+					plotContainers[index],
+					plotData.data as Plotly.Data[],
+					{
+						...plotData.layout,
+						autosize: true,
+						margin: { t: 40, r: 20, b: 40, l: 50 }
+					} as Plotly.Layout,
+					{ responsive: true, displayModeBar: false }
+				);
+			}
+		});
+	}
+
+	function renderMarkdown(text: string): string {
+		return marked.parse(text) as string;
 	}
 
 	async function saveQuery() {
@@ -351,6 +407,46 @@ return \`### Recent Steps
 				<h2>Result</h2>
 				{#if loading}
 					<p class="text-muted">Running query...</p>
+				{:else if renders.length > 0}
+					<div class="renders">
+						{#each renders as render, index}
+							{#if render.type === 'markdown'}
+								<div class="render-markdown">
+									{@html renderMarkdown(render.content as string)}
+								</div>
+							{:else if render.type === 'table'}
+								{@const tableData = render.content as TableData}
+								<div class="render-table">
+									<table>
+										<thead>
+											<tr>
+												{#each tableData.headers as header}
+													<th>{header}</th>
+												{/each}
+											</tr>
+										</thead>
+										<tbody>
+											{#each tableData.rows as row}
+												<tr>
+													{#each row as cell}
+														<td>{cell}</td>
+													{/each}
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								</div>
+							{:else if render.type === 'plotly'}
+								<div class="render-plotly" bind:this={plotContainers[index]}></div>
+							{/if}
+						{/each}
+					</div>
+					{#if result !== null && result !== undefined}
+						<div class="return-value">
+							<h3>Return Value</h3>
+							<pre class="result-output">{formatResult(result)}</pre>
+						</div>
+					{/if}
 				{:else if result !== null}
 					<pre class="result-output">{formatResult(result)}</pre>
 				{:else}
@@ -422,6 +518,19 @@ return \`### Recent Steps
 			<div class="card">
 				<h2>API Reference</h2>
 				<div class="api-docs">
+					<h3>Render API</h3>
+					<code>render.markdown(text)</code>
+					<p>Render markdown text (supports tables, lists, etc.)</p>
+
+					<code>render.table(&#123; headers, rows &#125;)</code>
+					<p>Render a structured table</p>
+
+					<code>render.plot.bar(&#123; x, y, name &#125;)</code>
+					<code>render.plot.line(&#123; x, y, name &#125;)</code>
+					<code>render.plot.pie(&#123; labels, values &#125;)</code>
+					<code>render.plot.multi([&#123;...&#125;])</code>
+					<p>Render Plotly charts</p>
+
 					<h3>Data Fetching</h3>
 					<code>q.daily(&#123; year, month, week, from, to &#125;)</code>
 					<p>Get daily records with metrics and tasks</p>
@@ -781,5 +890,91 @@ return \`### Recent Steps
 		margin: 0 0 var(--spacing-sm);
 		color: var(--color-text-muted);
 		font-size: 0.75rem;
+	}
+
+	/* Render output styles */
+	.renders {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-md);
+	}
+
+	.render-markdown {
+		font-size: 0.875rem;
+		line-height: 1.6;
+	}
+
+	.render-markdown :global(h1),
+	.render-markdown :global(h2),
+	.render-markdown :global(h3) {
+		margin: 0 0 var(--spacing-sm);
+	}
+
+	.render-markdown :global(h1) { font-size: 1.5rem; }
+	.render-markdown :global(h2) { font-size: 1.25rem; }
+	.render-markdown :global(h3) { font-size: 1rem; }
+
+	.render-markdown :global(p) {
+		margin: 0 0 var(--spacing-sm);
+	}
+
+	.render-markdown :global(p:last-child) {
+		margin-bottom: 0;
+	}
+
+	.render-markdown :global(table) {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.8rem;
+	}
+
+	.render-markdown :global(th),
+	.render-markdown :global(td) {
+		padding: var(--spacing-xs) var(--spacing-sm);
+		border: 1px solid var(--color-border);
+		text-align: left;
+	}
+
+	.render-markdown :global(th) {
+		background: var(--color-bg);
+		font-weight: 600;
+	}
+
+	.render-table {
+		overflow-x: auto;
+	}
+
+	.render-table table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.8rem;
+	}
+
+	.render-table th,
+	.render-table td {
+		padding: var(--spacing-xs) var(--spacing-sm);
+		border: 1px solid var(--color-border);
+		text-align: left;
+	}
+
+	.render-table th {
+		background: var(--color-bg);
+		font-weight: 600;
+	}
+
+	.render-plotly {
+		min-height: 250px;
+	}
+
+	.return-value {
+		margin-top: var(--spacing-md);
+		padding-top: var(--spacing-md);
+		border-top: 1px solid var(--color-border);
+	}
+
+	.return-value h3 {
+		margin: 0 0 var(--spacing-sm);
+		font-size: 0.875rem;
+		color: var(--color-text-muted);
 	}
 </style>

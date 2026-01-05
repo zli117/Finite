@@ -13,6 +13,7 @@ export interface AuthUser {
 	id: string;
 	username: string;
 	weekStartDay: 'sunday' | 'monday';
+	timezone: string;
 }
 
 /**
@@ -50,7 +51,7 @@ export async function createUser(username: string, password: string): Promise<Au
 		passwordHash
 	});
 
-	return { id, username, weekStartDay: 'monday' };
+	return { id, username, weekStartDay: 'monday', timezone: 'UTC' };
 }
 
 /**
@@ -73,7 +74,7 @@ export async function authenticateUser(
 		return null;
 	}
 
-	return { id: user.id, username: user.username, weekStartDay: user.weekStartDay || 'monday' };
+	return { id: user.id, username: user.username, weekStartDay: user.weekStartDay || 'monday', timezone: user.timezone || 'UTC' };
 }
 
 /**
@@ -118,7 +119,7 @@ export async function getUserFromSession(sessionId: string): Promise<AuthUser | 
 		return null;
 	}
 
-	return { id: user.id, username: user.username, weekStartDay: user.weekStartDay || 'monday' };
+	return { id: user.id, username: user.username, weekStartDay: user.weekStartDay || 'monday', timezone: user.timezone || 'UTC' };
 }
 
 /**

@@ -13,12 +13,14 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 
 	const year = url.searchParams.get('year');
 	const level = url.searchParams.get('level');
+	const month = url.searchParams.get('month');
 
 	let query = db.query.objectives.findMany({
 		where: (obj, { eq, and }) => {
 			const conditions = [eq(obj.userId, locals.user!.id)];
 			if (year) conditions.push(eq(obj.year, parseInt(year)));
 			if (level) conditions.push(eq(obj.level, level as 'yearly' | 'monthly'));
+			if (month) conditions.push(eq(obj.month, parseInt(month)));
 			return and(...conditions);
 		},
 		with: {

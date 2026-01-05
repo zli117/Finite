@@ -6,6 +6,7 @@ export const users = sqliteTable('users', {
 	username: text('username').notNull().unique(),
 	passwordHash: text('password_hash').notNull(),
 	weekStartDay: text('week_start_day', { enum: ['sunday', 'monday'] }).notNull().default('monday'),
+	timezone: text('timezone').notNull().default('UTC'), // IANA timezone identifier (e.g., 'America/New_York')
 	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });
 
@@ -109,6 +110,9 @@ export const tasks = sqliteTable('tasks', {
 	completed: integer('completed', { mode: 'boolean' }).notNull().default(false),
 	completedAt: integer('completed_at', { mode: 'timestamp' }),
 	sortOrder: integer('sort_order').notNull().default(0),
+	// Time tracking
+	timeSpentMs: integer('time_spent_ms').notNull().default(0), // Cumulative time in milliseconds
+	timerStartedAt: integer('timer_started_at', { mode: 'timestamp' }), // When timer was started (null = not running)
 	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 	updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });

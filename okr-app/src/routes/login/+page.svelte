@@ -25,8 +25,8 @@
 				return;
 			}
 
-			// Redirect to dashboard
-			goto('/');
+			// Redirect to dashboard with full invalidation to refresh layout
+			goto('/', { invalidateAll: true });
 		} catch (err) {
 			error = 'An error occurred. Please try again.';
 		} finally {

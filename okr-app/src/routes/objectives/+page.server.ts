@@ -2,23 +2,36 @@ import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db/client';
 import { objectives, keyResults, savedQueries } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 
-export const load: PageServerLoad = async ({ locals, url }) => {
+export const load: PageServerLoad = async ({ locals, url, depends }) => {
+	// Register dependency for invalidation
+	depends('data:objectives');
+
 	if (!locals.user) {
 		throw redirect(302, '/login');
 	}
 
 	const year = parseInt(url.searchParams.get('year') || String(new Date().getFullYear()));
 	const level = (url.searchParams.get('level') as 'yearly' | 'monthly') || 'yearly';
+	const month = level === 'monthly'
+		? parseInt(url.searchParams.get('month') || String(new Date().getMonth() + 1))
+		: null;
 
-	// Get objectives for the selected year and level
+	// Get objectives for the selected year and level (and month if monthly)
 	const userObjectives = await db.query.objectives.findMany({
-		where: and(
-			eq(objectives.userId, locals.user.id),
-			eq(objectives.year, year),
-			eq(objectives.level, level)
-		)
+		where: level === 'monthly' && month
+			? and(
+				eq(objectives.userId, locals.user.id),
+				eq(objectives.year, year),
+				eq(objectives.level, level),
+				eq(objectives.month, month)
+			)
+			: and(
+				eq(objectives.userId, locals.user.id),
+				eq(objectives.year, year),
+				eq(objectives.level, level)
+			)
 	});
 
 	// Get key results for each objective
@@ -56,12 +69,32 @@ export const load: PageServerLoad = async ({ locals, url }) => {
 		)
 	});
 
+	// Get distinct years that have objectives for this user
+	const yearsResult = await db
+		.selectDistinct({ year: objectives.year })
+		.from(objectives)
+		.where(eq(objectives.userId, locals.user.id))
+		.orderBy(objectives.year);
+
+	const currentYear = new Date().getFullYear();
+	let availableYears = yearsResult.map(r => r.year);
+
+	// If no years found, default to current year
+	if (availableYears.length === 0) {
+		availableYears = [currentYear];
+	}
+	// If current year not in list and we're viewing it, add it
+	else if (!availableYears.includes(year)) {
+		availableYears = [...availableYears, year].sort((a, b) => a - b);
+	}
+
 	return {
 		year,
 		level,
+		month,
 		objectives: objectivesWithKRs,
 		overallScore,
-		years: [2024, 2025, 2026], // Available years to select
+		years: availableYears,
 		progressQueries: progressQueries.map(q => ({ id: q.id, name: q.name, code: q.code }))
 	};
 };

@@ -12,7 +12,7 @@
 
 	async function handleLogout() {
 		await fetch('/api/auth/logout', { method: 'POST' });
-		goto('/login');
+		goto('/login', { invalidateAll: true });
 	}
 
 	function isActive(path: string): boolean {

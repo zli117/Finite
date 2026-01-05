@@ -1,15 +1,17 @@
 <script lang="ts">
-	import type { Task } from '$lib/types';
+	import type { Task, Tag } from '$lib/types';
 	import TaskItem from './TaskItem.svelte';
 
 	interface Props {
 		tasks: Task[];
+		tags?: Tag[];
 		onToggle: (id: string) => void;
 		onUpdate: (id: string, updates: Partial<Task>) => void;
 		onDelete: (id: string) => void;
+		onTimerToggle: (id: string, action: 'start' | 'stop') => void;
 	}
 
-	let { tasks, onToggle, onUpdate, onDelete }: Props = $props();
+	let { tasks, tags = [], onToggle, onUpdate, onDelete, onTimerToggle }: Props = $props();
 
 	const completedTasks = $derived(tasks.filter((t) => t.completed));
 	const pendingTasks = $derived(tasks.filter((t) => !t.completed));
@@ -34,7 +36,7 @@
 		<ul class="task-list">
 			{#each pendingTasks as task (task.id)}
 				<li>
-					<TaskItem {task} {onToggle} {onUpdate} {onDelete} />
+					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} />
 				</li>
 			{/each}
 			{#if completedTasks.length > 0 && pendingTasks.length > 0}
@@ -44,7 +46,7 @@
 			{/if}
 			{#each completedTasks as task (task.id)}
 				<li>
-					<TaskItem {task} {onToggle} {onUpdate} {onDelete} />
+					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} />
 				</li>
 			{/each}
 		</ul>

@@ -1,18 +1,78 @@
 <script lang="ts">
-	import type { Task, TaskAttribute } from '$lib/types';
+	import type { Task, Tag } from '$lib/types';
 
 	interface Props {
 		task: Task;
+		tags?: Tag[];
 		onToggle: (id: string) => void;
 		onUpdate: (id: string, updates: Partial<Task>) => void;
 		onDelete: (id: string) => void;
+		onTimerToggle: (id: string, action: 'start' | 'stop') => void;
 	}
 
-	let { task, onToggle, onUpdate, onDelete }: Props = $props();
+	let { task, tags = [], onToggle, onUpdate, onDelete, onTimerToggle }: Props = $props();
 
 	let editing = $state(false);
 	let editTitle = $state(task.title);
 	let showAttributes = $state(false);
+	let showTagPicker = $state(false);
+
+	// Sync editTitle when task.title changes (for when props update)
+	$effect(() => {
+		if (!editing) {
+			editTitle = task.title;
+		}
+	});
+
+	// Timer state for live updates
+	let liveElapsed = $state(0);
+
+	// Check if timer is running - use explicit null check
+	const isTimerRunning = $derived(task.timerStartedAt !== null && task.timerStartedAt !== undefined);
+
+	// Calculate total time (saved + live elapsed)
+	const totalTimeMs = $derived((task.timeSpentMs || 0) + liveElapsed);
+
+	// Store the timerStartedAt value for use in effect
+	const timerStartedAt = $derived(task.timerStartedAt);
+
+	// Start interval when timer is running
+	$effect(() => {
+		// Access timerStartedAt to establish dependency
+		const startedAt = timerStartedAt;
+
+		if (isTimerRunning && startedAt) {
+			// Calculate initial elapsed time
+			liveElapsed = Date.now() - new Date(startedAt).getTime();
+
+			// Start interval to update every second
+			const interval = setInterval(() => {
+				// Access the current timerStartedAt from derived
+				if (task.timerStartedAt) {
+					liveElapsed = Date.now() - new Date(task.timerStartedAt).getTime();
+				}
+			}, 1000);
+
+			return () => {
+				clearInterval(interval);
+			};
+		} else {
+			liveElapsed = 0;
+			return undefined;
+		}
+	});
+
+	function formatTime(ms: number): string {
+		const totalSeconds = Math.floor(ms / 1000);
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+
+		if (hours > 0) {
+			return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		}
+		return `${minutes}:${String(seconds).padStart(2, '0')}`;
+	}
 
 	function handleToggle() {
 		onToggle(task.id);
@@ -39,15 +99,24 @@
 		onUpdate(task.id, { attributes: newAttributes });
 	}
 
-	function formatAttributeValue(key: string, value: string): string {
-		if (key === 'hour' || key === 'expected_hours') {
-			return `${value}h`;
-		}
-		if (key === 'progress') {
-			return value;
-		}
-		return value;
+	function handleTimerClick() {
+		onTimerToggle(task.id, isTimerRunning ? 'stop' : 'start');
 	}
+
+	function handleTagToggle(tagId: string) {
+		const currentTagIds = task.tagIds || [];
+		const newTagIds = currentTagIds.includes(tagId)
+			? currentTagIds.filter((id) => id !== tagId)
+			: [...currentTagIds, tagId];
+		onUpdate(task.id, { tagIds: newTagIds } as Partial<Task>);
+	}
+
+	// Get assigned tags
+	const assignedTags = $derived(
+		(task.tagIds || [])
+			.map((tagId) => tags.find((t) => t.id === tagId))
+			.filter((t): t is Tag => t !== undefined)
+	);
 </script>
 
 <div class="task-item" class:task-completed={task.completed}>
@@ -79,18 +148,76 @@
 			</span>
 		{/if}
 
-		{#if task.attributes && Object.keys(task.attributes).length > 0}
-			<div class="task-attributes">
-				{#each Object.entries(task.attributes) as [key, value]}
-					<span class="task-attribute" title={key}>
-						{key}: {formatAttributeValue(key, value)}
-					</span>
-				{/each}
-			</div>
-		{/if}
+		<div class="task-meta">
+			<!-- Timer display -->
+			{#if totalTimeMs > 0 || isTimerRunning}
+				<span class="task-time" class:running={isTimerRunning}>
+					{formatTime(totalTimeMs)}
+				</span>
+			{/if}
+
+			<!-- Tags -->
+			{#if assignedTags.length > 0}
+				<div class="task-tags">
+					{#each assignedTags as tag}
+						<span
+							class="task-tag"
+							style={tag.color ? `background-color: ${tag.color}20; color: ${tag.color}; border-color: ${tag.color}` : ''}
+						>
+							{tag.name}
+						</span>
+					{/each}
+				</div>
+			{/if}
+
+			<!-- Other attributes (progress, expected_hours) -->
+			{#if task.attributes && (task.attributes.progress || task.attributes.expected_hours)}
+				<div class="task-attributes">
+					{#if task.attributes.progress}
+						<span class="task-attribute">progress: {task.attributes.progress}</span>
+					{/if}
+					{#if task.attributes.expected_hours}
+						<span class="task-attribute">est: {task.attributes.expected_hours}h</span>
+					{/if}
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	<div class="task-actions">
+		<!-- Timer button -->
+		<button
+			class="btn-icon btn-timer"
+			class:running={isTimerRunning}
+			onclick={handleTimerClick}
+			title={isTimerRunning ? 'Stop timer' : 'Start timer'}
+		>
+			{#if isTimerRunning}
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+					<rect x="6" y="4" width="4" height="16" rx="1"/>
+					<rect x="14" y="4" width="4" height="16" rx="1"/>
+				</svg>
+			{:else}
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+					<polygon points="5 3 19 12 5 21 5 3"/>
+				</svg>
+			{/if}
+		</button>
+
+		<!-- Tag picker -->
+		{#if tags.length > 0}
+			<button
+				class="btn-icon"
+				onclick={() => (showTagPicker = !showTagPicker)}
+				title="Manage tags"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+					<line x1="7" y1="7" x2="7.01" y2="7"/>
+				</svg>
+			</button>
+		{/if}
+
 		<button
 			class="btn-icon"
 			onclick={() => (showAttributes = !showAttributes)}
@@ -114,20 +241,31 @@
 	</div>
 </div>
 
+{#if showTagPicker}
+	<div class="task-tag-picker">
+		<span class="picker-label">Tags:</span>
+		<div class="tag-options">
+			{#each tags as tag}
+				<label class="tag-option">
+					<input
+						type="checkbox"
+						checked={(task.tagIds || []).includes(tag.id)}
+						onchange={() => handleTagToggle(tag.id)}
+					/>
+					<span
+						class="tag-chip"
+						style={tag.color ? `background-color: ${tag.color}20; color: ${tag.color}; border-color: ${tag.color}` : ''}
+					>
+						{tag.name}
+					</span>
+				</label>
+			{/each}
+		</div>
+	</div>
+{/if}
+
 {#if showAttributes}
 	<div class="task-attribute-editor">
-		<div class="attribute-row">
-			<label class="label">Hours</label>
-			<input
-				type="number"
-				class="input input-sm"
-				value={task.attributes?.hour || ''}
-				onchange={(e) => handleAttributeChange('hour', e.currentTarget.value)}
-				placeholder="0"
-				step="0.5"
-				min="0"
-			/>
-		</div>
 		<div class="attribute-row">
 			<label class="label">Progress</label>
 			<input
@@ -187,11 +325,55 @@
 		font-size: inherit;
 	}
 
+	.task-meta {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--spacing-xs);
+		margin-top: var(--spacing-xs);
+	}
+
+	.task-time {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 6px;
+		font-size: 0.75rem;
+		font-family: monospace;
+		background-color: var(--color-bg-hover);
+		border-radius: var(--radius-sm);
+		color: var(--color-text-muted);
+	}
+
+	.task-time.running {
+		background-color: #fef3c7;
+		color: #b45309;
+		animation: pulse 2s infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.7; }
+	}
+
+	.task-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+
+	.task-tag {
+		display: inline-block;
+		padding: 2px 6px;
+		font-size: 0.7rem;
+		background-color: var(--color-bg-hover);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+	}
+
 	.task-attributes {
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--spacing-xs);
-		margin-top: var(--spacing-xs);
 	}
 
 	.task-attribute {
@@ -214,6 +396,15 @@
 		opacity: 1;
 	}
 
+	/* Always show timer button when running */
+	.btn-timer.running {
+		opacity: 1 !important;
+	}
+
+	.task-item:has(.btn-timer.running) .task-actions {
+		opacity: 1;
+	}
+
 	.btn-icon {
 		display: flex;
 		align-items: center;
@@ -233,9 +424,72 @@
 		color: var(--color-text);
 	}
 
+	.btn-timer {
+		color: var(--color-success);
+	}
+
+	.btn-timer.running {
+		color: #b45309;
+		background-color: #fef3c7;
+	}
+
+	.btn-timer:hover {
+		background-color: #f0fdf4;
+	}
+
+	.btn-timer.running:hover {
+		background-color: #fde68a;
+	}
+
 	.btn-icon-danger:hover {
 		background-color: #fef2f2;
 		color: var(--color-error);
+	}
+
+	.task-tag-picker {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-sm);
+		padding: var(--spacing-sm) 0 var(--spacing-sm) 28px;
+		border-bottom: 1px solid var(--color-border);
+		background-color: var(--color-bg);
+	}
+
+	.picker-label {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+	}
+
+	.tag-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--spacing-xs);
+	}
+
+	.tag-option {
+		display: flex;
+		align-items: center;
+		cursor: pointer;
+	}
+
+	.tag-option input {
+		display: none;
+	}
+
+	.tag-chip {
+		display: inline-block;
+		padding: 2px 8px;
+		font-size: 0.75rem;
+		background-color: var(--color-bg-hover);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		transition: all 0.15s ease;
+	}
+
+	.tag-option input:checked + .tag-chip {
+		background-color: var(--color-primary);
+		color: white;
+		border-color: var(--color-primary);
 	}
 
 	.task-attribute-editor {

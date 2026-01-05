@@ -8,6 +8,38 @@
 	let loading = $state(false);
 	let error = $state('');
 
+	// Local mutable state for objectives (for optimistic updates)
+	let localObjectives = $state(structuredClone(data.objectives));
+	let localOverallScore = $state(data.overallScore);
+
+	// Sync from server data when it changes (year/level switch, create/delete operations)
+	$effect(() => {
+		// This runs when data.objectives reference changes (from server reload)
+		localObjectives = structuredClone(data.objectives);
+		localOverallScore = data.overallScore;
+	});
+
+	// Helper to recalculate objective average score
+	function recalculateObjectiveScore(objective: typeof localObjectives[0]): number {
+		if (objective.keyResults.length === 0) return 0;
+		const totalWeight = objective.keyResults.reduce((sum, kr) => sum + kr.weight, 0);
+		if (totalWeight === 0) return 0;
+		return objective.keyResults.reduce((sum, kr) => {
+			const score = getKRScore(kr);
+			return sum + score * kr.weight;
+		}, 0) / totalWeight;
+	}
+
+	// Helper to recalculate overall score
+	function recalculateOverallScore(): number {
+		if (localObjectives.length === 0) return 0;
+		const totalWeight = localObjectives.reduce((sum, obj) => sum + obj.weight, 0);
+		if (totalWeight === 0) return 0;
+		return localObjectives.reduce((sum, obj) => {
+			return sum + obj.averageScore * obj.weight;
+		}, 0) / totalWeight;
+	}
+
 	// Track loading state and live scores for custom_query KRs
 	let loadingKRs = $state<Set<string>>(new Set());
 	let liveScores = $state<Map<string, number>>(new Map());
@@ -15,7 +47,7 @@
 
 	// Fetch progress for all custom_query KRs when data changes
 	$effect(() => {
-		const customQueryKRs = data.objectives.flatMap(obj =>
+		const customQueryKRs = localObjectives.flatMap(obj =>
 			obj.keyResults
 				.filter(kr => kr.measurementType === 'custom_query' && kr.progressQueryCode)
 				.map(kr => kr.id)
@@ -68,7 +100,7 @@
 	}
 
 	// Get the display score for a KR (live score if available, otherwise stored score)
-	function getKRScore(kr: typeof data.objectives[0]['keyResults'][0]): number {
+	function getKRScore(kr: typeof localObjectives[0]['keyResults'][0]): number {
 		if (kr.measurementType === 'custom_query' && liveScores.has(kr.id)) {
 			return liveScores.get(kr.id)!;
 		}
@@ -97,17 +129,34 @@
 
 	// KR modal state (for both new and edit)
 	let krModalObjectiveId = $state<string | null>(null);
-	let editingKR = $state<{objectiveId: string, kr: typeof data.objectives[0]['keyResults'][0]} | null>(null);
+	let editingKR = $state<{objectiveId: string, kr: typeof localObjectives[0]['keyResults'][0]} | null>(null);
 
 	// Computed: is modal open?
 	const isKRModalOpen = $derived(krModalObjectiveId !== null || editingKR !== null);
 
+	// Month names for selector
+	const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+		'July', 'August', 'September', 'October', 'November', 'December'];
+
 	function changeYear(year: number) {
-		goto(`/objectives?year=${year}&level=${data.level}`);
+		const params = new URLSearchParams({ year: String(year), level: data.level });
+		if (data.level === 'monthly' && data.month) {
+			params.set('month', String(data.month));
+		}
+		goto(`/objectives?${params.toString()}`);
 	}
 
 	function changeLevel(level: string) {
-		goto(`/objectives?year=${data.year}&level=${level}`);
+		const params = new URLSearchParams({ year: String(data.year), level });
+		if (level === 'monthly') {
+			// Default to current month when switching to monthly
+			params.set('month', String(data.month || new Date().getMonth() + 1));
+		}
+		goto(`/objectives?${params.toString()}`);
+	}
+
+	function changeMonth(month: number) {
+		goto(`/objectives?year=${data.year}&level=monthly&month=${month}`);
 	}
 
 	async function createObjective() {
@@ -117,16 +166,23 @@
 		error = '';
 
 		try {
+			const payload: Record<string, unknown> = {
+				level: data.level,
+				year: data.year,
+				title: newTitle.trim(),
+				description: newDescription.trim() || null,
+				weight: parseFloat(newWeight) || 1
+			};
+
+			// Include month for monthly objectives
+			if (data.level === 'monthly' && data.month) {
+				payload.month = data.month;
+			}
+
 			const response = await fetch('/api/objectives', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					level: data.level,
-					year: data.year,
-					title: newTitle.trim(),
-					description: newDescription.trim() || null,
-					weight: parseFloat(newWeight) || 1
-				})
+				body: JSON.stringify(payload)
 			});
 
 			if (!response.ok) {
@@ -199,7 +255,7 @@
 		editingKR = null;
 	}
 
-	function openEditKR(objectiveId: string, kr: typeof data.objectives[0]['keyResults'][0]) {
+	function openEditKR(objectiveId: string, kr: typeof localObjectives[0]['keyResults'][0]) {
 		editingKR = { objectiveId, kr };
 		krModalObjectiveId = null;
 		krTitle = kr.title;
@@ -281,9 +337,15 @@
 	}
 
 	async function toggleCheckboxItem(objectiveId: string, krId: string, itemId: string) {
-		const objective = data.objectives.find(o => o.id === objectiveId);
-		const kr = objective?.keyResults.find(k => k.id === krId);
-		if (!kr?.checkboxItems) return;
+		const objectiveIndex = localObjectives.findIndex(o => o.id === objectiveId);
+		if (objectiveIndex === -1) return;
+
+		const objective = localObjectives[objectiveIndex];
+		const krIndex = objective.keyResults.findIndex(k => k.id === krId);
+		if (krIndex === -1) return;
+
+		const kr = objective.keyResults[krIndex];
+		if (!kr.checkboxItems) return;
 
 		const items = JSON.parse(kr.checkboxItems) as Array<{id: string, label: string, completed: boolean}>;
 		const updatedItems = items.map(item =>
@@ -291,20 +353,36 @@
 		);
 
 		// Calculate score from checkbox completion
-		const score = updatedItems.filter(i => i.completed).length / updatedItems.length;
+		const newScore = updatedItems.filter(i => i.completed).length / updatedItems.length;
+
+		// Optimistic update: Update local state immediately
+		localObjectives[objectiveIndex].keyResults[krIndex].checkboxItems = JSON.stringify(updatedItems);
+		localObjectives[objectiveIndex].keyResults[krIndex].score = newScore;
+
+		// Recalculate objective's average score
+		localObjectives[objectiveIndex].averageScore = recalculateObjectiveScore(localObjectives[objectiveIndex]);
+
+		// Recalculate overall score
+		localOverallScore = recalculateOverallScore();
 
 		try {
-			await fetch(`/api/objectives/${objectiveId}/key-results/${krId}`, {
+			const response = await fetch(`/api/objectives/${objectiveId}/key-results/${krId}`, {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					checkboxItems: JSON.stringify(updatedItems),
-					score
+					score: newScore
 				})
 			});
-			await invalidateAll();
+
+			if (!response.ok) {
+				throw new Error('Failed to update checkbox');
+			}
+			// No invalidateAll() - we already updated local state
 		} catch (err) {
 			error = 'Failed to update checkbox';
+			// Revert on error by reloading from server
+			await invalidateAll();
 		}
 	}
 
@@ -364,7 +442,7 @@
 </script>
 
 <svelte:head>
-	<title>Objectives {data.year} - OKR Tracker</title>
+	<title>Objectives {data.year}{data.level === 'monthly' && data.month ? ` - ${monthNames[data.month - 1]}` : ''} - OKR Tracker</title>
 </svelte:head>
 
 <div class="objectives-page">
@@ -376,6 +454,13 @@
 					<option value={year}>{year}</option>
 				{/each}
 			</select>
+			{#if data.level === 'monthly'}
+				<select class="input select-sm" value={data.month} onchange={(e) => changeMonth(parseInt(e.currentTarget.value))}>
+					{#each monthNames as name, index}
+						<option value={index + 1}>{name}</option>
+					{/each}
+				</select>
+			{/if}
 			<div class="level-tabs">
 				<button
 					class="tab"
@@ -401,16 +486,16 @@
 
 	<div class="overall-score card">
 		<div class="score-display">
-			<span class="score-value">{(data.overallScore * 100).toFixed(0)}%</span>
-			<span class="score-label">Overall {data.level === 'yearly' ? 'Year' : 'Month'} Score</span>
+			<span class="score-value">{(localOverallScore * 100).toFixed(0)}%</span>
+			<span class="score-label">Overall {data.level === 'yearly' ? 'Year' : (data.month ? monthNames[data.month - 1] : 'Month')} Score</span>
 		</div>
 		<div class="progress-bar progress-bar-lg">
-			<div class="progress-bar-fill" style="width: {data.overallScore * 100}%;"></div>
+			<div class="progress-bar-fill" style="width: {localOverallScore * 100}%;"></div>
 		</div>
 	</div>
 
 	<div class="objectives-list">
-		{#each data.objectives as objective}
+		{#each localObjectives as objective}
 			<div class="card objective-card">
 				<div class="objective-header">
 					<div class="objective-info">

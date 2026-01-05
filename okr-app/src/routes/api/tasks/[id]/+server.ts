@@ -153,14 +153,25 @@ export const PATCH: RequestHandler = async ({ locals, params }) => {
 	}
 
 	const newCompleted = !existing.completed;
+	const now = new Date();
+
+	// Build update object
+	const updates: Record<string, unknown> = {
+		completed: newCompleted,
+		completedAt: newCompleted ? now : null,
+		updatedAt: now
+	};
+
+	// If completing the task and timer is running, stop it and save elapsed time
+	if (newCompleted && existing.timerStartedAt) {
+		const elapsedMs = now.getTime() - existing.timerStartedAt.getTime();
+		updates.timeSpentMs = (existing.timeSpentMs || 0) + elapsedMs;
+		updates.timerStartedAt = null;
+	}
 
 	await db
 		.update(tasks)
-		.set({
-			completed: newCompleted,
-			completedAt: newCompleted ? new Date() : null,
-			updatedAt: new Date()
-		})
+		.set(updates)
 		.where(eq(tasks.id, params.id));
 
 	const task = await db.query.tasks.findFirst({

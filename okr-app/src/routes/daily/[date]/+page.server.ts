@@ -2,7 +2,11 @@ import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import type { MetricDefinition } from '$lib/db/schema';
 
-export const load: PageServerLoad = async ({ params, locals, fetch }) => {
+export const load: PageServerLoad = async ({ params, locals, fetch, depends }) => {
+	// Register dependencies for invalidation
+	depends('data:daily');
+	depends('data:tasks');
+
 	if (!locals.user) {
 		throw redirect(302, '/login');
 	}

@@ -1,8 +1,58 @@
 /**
  * Week calculation utilities that support both Sunday-first and Monday-first weeks
+ * Also includes timezone-aware date utilities
  */
 
 export type WeekStartDay = 'sunday' | 'monday';
+
+/**
+ * Get the current date string (YYYY-MM-DD) in a specific timezone
+ */
+export function getTodayInTimezone(timezone: string = 'UTC'): string {
+	const now = new Date();
+	const formatter = new Intl.DateTimeFormat('en-CA', {
+		timeZone: timezone,
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit'
+	});
+	return formatter.format(now); // Returns YYYY-MM-DD format
+}
+
+/**
+ * Get a Date object representing the start of today in a specific timezone
+ * The returned Date is in UTC but represents midnight in the specified timezone
+ */
+export function getTodayDateInTimezone(timezone: string = 'UTC'): Date {
+	const dateStr = getTodayInTimezone(timezone);
+	// Parse as UTC to avoid local timezone issues
+	const [year, month, day] = dateStr.split('-').map(Number);
+	return new Date(Date.UTC(year, month - 1, day));
+}
+
+/**
+ * Get the current year in a specific timezone
+ */
+export function getCurrentYearInTimezone(timezone: string = 'UTC'): number {
+	const now = new Date();
+	const formatter = new Intl.DateTimeFormat('en-US', {
+		timeZone: timezone,
+		year: 'numeric'
+	});
+	return parseInt(formatter.format(now), 10);
+}
+
+/**
+ * Get the current month (1-12) in a specific timezone
+ */
+export function getCurrentMonthInTimezone(timezone: string = 'UTC'): number {
+	const now = new Date();
+	const formatter = new Intl.DateTimeFormat('en-US', {
+		timeZone: timezone,
+		month: 'numeric'
+	});
+	return parseInt(formatter.format(now), 10);
+}
 
 /**
  * Get the ISO week number (Monday-first, week 1 contains Jan 4)

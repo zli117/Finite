@@ -85,6 +85,7 @@
 
 <div class="settings-page">
 	<header class="page-header">
+		<a href="/settings" class="back-link">← Settings</a>
 		<h1>Integrations</h1>
 		<p class="text-muted">Connect external services to automatically import your health and fitness data.</p>
 	</header>
@@ -227,6 +228,18 @@
 
 	.page-header {
 		margin-bottom: var(--spacing-lg);
+	}
+
+	.back-link {
+		display: inline-block;
+		margin-bottom: var(--spacing-sm);
+		color: var(--color-text-muted);
+		text-decoration: none;
+		font-size: 0.875rem;
+	}
+
+	.back-link:hover {
+		color: var(--color-primary);
 	}
 
 	.page-header h1 {

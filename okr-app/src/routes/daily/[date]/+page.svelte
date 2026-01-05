@@ -7,6 +7,10 @@
 	let { data } = $props();
 
 	let newTaskTitle = $state('');
+	let newTaskProgress = $state('');
+	let newTaskExpectedHours = $state('');
+	let newTaskTagIds = $state<string[]>([]);
+	let showNewTaskOptions = $state(false);
 	let loading = $state(false);
 	let error = $state('');
 
@@ -73,12 +77,25 @@
 		error = '';
 
 		try {
+			// Build attributes object
+			const attributes: Record<string, string> = {};
+			const progressStr = String(newTaskProgress).trim();
+			const expectedHoursStr = String(newTaskExpectedHours).trim();
+			if (progressStr && progressStr !== '0') {
+				attributes.progress = progressStr;
+			}
+			if (expectedHoursStr && expectedHoursStr !== '0') {
+				attributes.expected_hours = expectedHoursStr;
+			}
+
 			const response = await fetch('/api/tasks', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					timePeriodId: data.period.id,
-					title: newTaskTitle.trim()
+					title: newTaskTitle.trim(),
+					attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
+					tagIds: newTaskTagIds.length > 0 ? newTaskTagIds : undefined
 				})
 			});
 
@@ -87,7 +104,12 @@
 				throw new Error(result.error || 'Failed to create task');
 			}
 
+			// Reset form
 			newTaskTitle = '';
+			newTaskProgress = '';
+			newTaskExpectedHours = '';
+			newTaskTagIds = [];
+			showNewTaskOptions = false;
 			await invalidateAll();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to create task';
@@ -146,6 +168,25 @@
 		}
 	}
 
+	async function toggleTimer(id: string, action: 'start' | 'stop') {
+		try {
+			const response = await fetch(`/api/tasks/${id}/timer`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action })
+			});
+
+			if (!response.ok) {
+				const result = await response.json();
+				throw new Error(result.error || 'Failed to toggle timer');
+			}
+
+			await invalidateAll();
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to toggle timer';
+		}
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
@@ -196,23 +237,96 @@
 
 			<TaskList
 				tasks={data.tasks}
+				tags={data.tags || []}
 				onToggle={toggleTask}
 				onUpdate={updateTask}
 				onDelete={deleteTask}
+				onTimerToggle={toggleTimer}
 			/>
 
 			<form class="add-task-form" onsubmit={(e) => { e.preventDefault(); addTask(); }}>
-				<input
-					type="text"
-					class="input"
-					placeholder="Add a new task..."
-					bind:value={newTaskTitle}
-					onkeydown={handleKeydown}
-					disabled={loading}
-				/>
-				<button class="btn btn-primary" type="submit" disabled={loading || !newTaskTitle.trim()}>
-					{loading ? 'Adding...' : 'Add'}
-				</button>
+				<div class="add-task-main">
+					<input
+						type="text"
+						class="input"
+						placeholder="Add a new task..."
+						bind:value={newTaskTitle}
+						onkeydown={handleKeydown}
+						disabled={loading}
+					/>
+					<button
+						type="button"
+						class="btn btn-secondary btn-icon-only"
+						onclick={() => (showNewTaskOptions = !showNewTaskOptions)}
+						title="More options"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<circle cx="12" cy="12" r="1"/>
+							<circle cx="19" cy="12" r="1"/>
+							<circle cx="5" cy="12" r="1"/>
+						</svg>
+					</button>
+					<button class="btn btn-primary" type="submit" disabled={loading || !newTaskTitle.trim()}>
+						{loading ? 'Adding...' : 'Add'}
+					</button>
+				</div>
+
+				{#if showNewTaskOptions}
+					<div class="add-task-options">
+						<div class="option-row">
+							<label class="option-label">Progress</label>
+							<input
+								type="number"
+								class="input input-sm"
+								bind:value={newTaskProgress}
+								placeholder="0"
+								min="0"
+								disabled={loading}
+							/>
+						</div>
+						<div class="option-row">
+							<label class="option-label">Expected Hours</label>
+							<input
+								type="number"
+								class="input input-sm"
+								bind:value={newTaskExpectedHours}
+								placeholder="0"
+								step="0.5"
+								min="0"
+								disabled={loading}
+							/>
+						</div>
+						{#if data.tags && data.tags.length > 0}
+							<div class="option-row option-row-tags">
+								<label class="option-label">Tags</label>
+								<div class="tag-options">
+									{#each data.tags as tag}
+										<label class="tag-option">
+											<input
+												type="checkbox"
+												checked={newTaskTagIds.includes(tag.id)}
+												onchange={() => {
+													if (newTaskTagIds.includes(tag.id)) {
+														newTaskTagIds = newTaskTagIds.filter(id => id !== tag.id);
+													} else {
+														newTaskTagIds = [...newTaskTagIds, tag.id];
+													}
+												}}
+												disabled={loading}
+											/>
+											<span
+												class="tag-chip"
+												style={tag.color ? `background-color: ${tag.color}20; color: ${tag.color}; border-color: ${tag.color}` : ''}
+											>
+												{tag.name}
+											</span>
+										</label>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</form>
 
 			<!-- Metrics Section (inline below tasks) -->
@@ -227,17 +341,18 @@
 					<div class="metrics-grid">
 						{#each data.flexibleMetrics.metricsDefinition as metric}
 							{@const value = data.flexibleMetrics?.values[metric.name]}
-							{#if value !== null && value !== undefined && value !== ''}
-								<div class="metric-item">
-									<span class="metric-label">{metric.label}</span>
-									<span class="metric-value">{formatMetricValue(metric, value)}{metric.unit ? ` ${metric.unit}` : ''}</span>
-								</div>
-							{/if}
+							<div class="metric-item">
+								<span class="metric-label">{metric.label}</span>
+								<span class="metric-value" class:empty={value === null || value === undefined || value === ''}>
+									{#if value !== null && value !== undefined && value !== ''}
+										{formatMetricValue(metric, value)}{metric.unit ? ` ${metric.unit}` : ''}
+									{:else}
+										-
+									{/if}
+								</span>
+							</div>
 						{/each}
 					</div>
-					{#if Object.values(data.flexibleMetrics.values).every(v => v === null || v === undefined || v === '')}
-						<p class="text-muted text-sm">No metrics recorded for this day.</p>
-					{/if}
 				{:else if data.metrics}
 					<!-- Legacy fixed metrics -->
 					<div class="metrics-grid">
@@ -354,14 +469,86 @@
 
 	.add-task-form {
 		display: flex;
+		flex-direction: column;
 		gap: var(--spacing-sm);
 		margin-top: var(--spacing-md);
 		padding-top: var(--spacing-md);
 		border-top: 1px solid var(--color-border);
 	}
 
-	.add-task-form .input {
+	.add-task-main {
+		display: flex;
+		gap: var(--spacing-sm);
+	}
+
+	.add-task-main .input {
 		flex: 1;
+	}
+
+	.btn-icon-only {
+		padding: var(--spacing-sm);
+		min-width: auto;
+	}
+
+	.add-task-options {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+		gap: var(--spacing-sm);
+		padding: var(--spacing-sm);
+		background-color: var(--color-bg);
+		border-radius: var(--radius-sm);
+	}
+
+	.option-row {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-xs);
+	}
+
+	.option-row-tags {
+		grid-column: 1 / -1;
+	}
+
+	.option-label {
+		font-size: 0.75rem;
+		color: var(--color-text-muted);
+	}
+
+	.tag-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--spacing-xs);
+	}
+
+	.tag-option {
+		display: flex;
+		align-items: center;
+		cursor: pointer;
+	}
+
+	.tag-option input {
+		display: none;
+	}
+
+	.tag-chip {
+		display: inline-block;
+		padding: 2px 8px;
+		font-size: 0.75rem;
+		background-color: var(--color-bg-hover);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		transition: all 0.15s ease;
+	}
+
+	.tag-option input:checked + .tag-chip {
+		background-color: var(--color-primary);
+		color: white;
+		border-color: var(--color-primary);
+	}
+
+	.input-sm {
+		padding: var(--spacing-xs) var(--spacing-sm);
+		font-size: 0.875rem;
 	}
 
 	/* Inline metrics section */
@@ -413,6 +600,11 @@
 	.metric-value {
 		font-size: 1rem;
 		font-weight: 600;
+	}
+
+	.metric-value.empty {
+		color: var(--color-text-muted);
+		font-weight: 400;
 	}
 
 	.text-sm {

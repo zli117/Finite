@@ -3,6 +3,54 @@
 
 	let { data } = $props();
 
+	// Month selector state
+	let selectedMonth = $state(data.currentMonth || new Date().getMonth() + 1);
+
+	const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+		'July', 'August', 'September', 'October', 'November', 'December'];
+
+	// Monthly objectives - local state for when user changes month
+	let monthlyObjectives = $state(data.monthlyObjectives || []);
+	let loadingMonthly = $state(false);
+
+	// Sync when server data changes
+	$effect(() => {
+		if (data.currentMonth) {
+			selectedMonth = data.currentMonth;
+		}
+		monthlyObjectives = data.monthlyObjectives || [];
+	});
+
+	async function changeMonth(month: number) {
+		if (month === selectedMonth) return;
+		selectedMonth = month;
+		loadingMonthly = true;
+
+		try {
+			const response = await fetch(`/api/objectives?year=${data.currentYear}&level=monthly&month=${month}`);
+			if (response.ok) {
+				const result = await response.json();
+				// Fetch key results for each objective
+				const objectivesWithKRs = await Promise.all(
+					result.objectives.map(async (obj: any) => {
+						const krResponse = await fetch(`/api/objectives/${obj.id}/key-results`);
+						const krResult = krResponse.ok ? await krResponse.json() : { keyResults: [] };
+						const krs = krResult.keyResults || [];
+						const avgScore = krs.length > 0
+							? krs.reduce((sum: number, kr: any) => sum + kr.score * kr.weight, 0) / krs.reduce((sum: number, kr: any) => sum + kr.weight, 0)
+							: 0;
+						return { ...obj, keyResults: krs, averageScore: avgScore };
+					})
+				);
+				monthlyObjectives = objectivesWithKRs;
+			}
+		} catch (err) {
+			console.error('Failed to fetch monthly objectives:', err);
+		} finally {
+			loadingMonthly = false;
+		}
+	}
+
 	const todayPercent = $derived(() => {
 		if (!data.today || data.today.totalCount === 0) return 0;
 		return Math.round((data.today.completedCount / data.today.totalCount) * 100);
@@ -14,8 +62,8 @@
 	});
 
 	// Example widget queries
-	const currentYear = new Date().getFullYear();
-	const currentMonth = new Date().getMonth() + 1;
+	const currentYear = data.currentYear || new Date().getFullYear();
+	const currentMonth = data.currentMonth || new Date().getMonth() + 1;
 
 	const sleepWidget = `
 const days = await q.daily({ year: ${currentYear}, month: ${currentMonth} });
@@ -88,11 +136,11 @@ return {
 			</div>
 		</div>
 
-		{#if data.objectives && data.objectives.length > 0}
+		{#if data.yearlyObjectives && data.yearlyObjectives.length > 0}
 			<section class="objectives-section">
-				<h2 class="mb-md">{new Date().getFullYear()} Objectives</h2>
+				<h2 class="mb-md">{data.currentYear} Yearly Objectives</h2>
 				<div class="objectives-grid">
-					{#each data.objectives as objective}
+					{#each data.yearlyObjectives as objective}
 						<div class="card objective-card">
 							<h3 class="objective-title">{objective.title}</h3>
 							{#if objective.description}
@@ -119,6 +167,49 @@ return {
 				</div>
 			</section>
 		{/if}
+
+		<section class="objectives-section">
+			<div class="section-header">
+				<h2>Monthly Objectives</h2>
+				<select class="input select-sm" value={selectedMonth} onchange={(e) => changeMonth(parseInt(e.currentTarget.value))}>
+					{#each monthNames as name, index}
+						<option value={index + 1}>{name}</option>
+					{/each}
+				</select>
+			</div>
+			{#if loadingMonthly}
+				<p class="text-muted">Loading...</p>
+			{:else if monthlyObjectives.length > 0}
+				<div class="objectives-grid">
+					{#each monthlyObjectives as objective}
+						<div class="card objective-card">
+							<h3 class="objective-title">{objective.title}</h3>
+							{#if objective.description}
+								<p class="objective-desc text-muted">{objective.description}</p>
+							{/if}
+							<div class="objective-score">
+								<div class="progress-bar">
+									<div class="progress-bar-fill" style="width: {objective.averageScore * 100}%;"></div>
+								</div>
+								<span class="score-label">{(objective.averageScore * 100).toFixed(0)}%</span>
+							</div>
+							{#if objective.keyResults.length > 0}
+								<ul class="kr-list">
+									{#each objective.keyResults as kr}
+										<li>
+											<span class="kr-score">{(kr.score * 100).toFixed(0)}%</span>
+											<span class="kr-title">{kr.title}</span>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{:else}
+				<p class="text-muted">No monthly objectives for {monthNames[selectedMonth - 1]}. <a href="/objectives?level=monthly&month={selectedMonth}">Create one</a></p>
+			{/if}
+		</section>
 
 		<section class="widgets-section">
 			<div class="widgets-header">
@@ -191,9 +282,28 @@ return {
 		margin-top: var(--spacing-xl);
 	}
 
+	.section-header {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-md);
+		margin-bottom: var(--spacing-md);
+	}
+
+	.section-header h2 {
+		margin: 0;
+	}
+
+	.section-header .select-sm {
+		padding: var(--spacing-xs) var(--spacing-sm);
+		font-size: 0.875rem;
+		width: auto;
+		min-width: 130px;
+		max-width: 150px;
+	}
+
 	.objectives-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(300px, 350px));
 		gap: var(--spacing-md);
 	}
 

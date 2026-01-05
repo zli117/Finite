@@ -9,9 +9,56 @@
 
 	// Preferences
 	let weekStartDay = $state<'sunday' | 'monday'>(data.user?.weekStartDay || 'monday');
+	let timezone = $state(data.user?.timezone || 'UTC');
 
-	async function saveWeekStartDay(value: 'sunday' | 'monday') {
-		weekStartDay = value;
+	// Common timezones grouped by region
+	const timezones = [
+		{ group: 'UTC', options: [{ value: 'UTC', label: 'UTC (Coordinated Universal Time)' }] },
+		{ group: 'Americas', options: [
+			{ value: 'America/New_York', label: 'Eastern Time (New York)' },
+			{ value: 'America/Chicago', label: 'Central Time (Chicago)' },
+			{ value: 'America/Denver', label: 'Mountain Time (Denver)' },
+			{ value: 'America/Los_Angeles', label: 'Pacific Time (Los Angeles)' },
+			{ value: 'America/Anchorage', label: 'Alaska Time' },
+			{ value: 'Pacific/Honolulu', label: 'Hawaii Time' },
+			{ value: 'America/Toronto', label: 'Toronto' },
+			{ value: 'America/Vancouver', label: 'Vancouver' },
+			{ value: 'America/Mexico_City', label: 'Mexico City' },
+			{ value: 'America/Sao_Paulo', label: 'São Paulo' },
+		]},
+		{ group: 'Europe', options: [
+			{ value: 'Europe/London', label: 'London (GMT/BST)' },
+			{ value: 'Europe/Paris', label: 'Paris (CET/CEST)' },
+			{ value: 'Europe/Berlin', label: 'Berlin' },
+			{ value: 'Europe/Amsterdam', label: 'Amsterdam' },
+			{ value: 'Europe/Rome', label: 'Rome' },
+			{ value: 'Europe/Madrid', label: 'Madrid' },
+			{ value: 'Europe/Moscow', label: 'Moscow' },
+		]},
+		{ group: 'Asia', options: [
+			{ value: 'Asia/Dubai', label: 'Dubai (GST)' },
+			{ value: 'Asia/Kolkata', label: 'India (IST)' },
+			{ value: 'Asia/Bangkok', label: 'Bangkok (ICT)' },
+			{ value: 'Asia/Singapore', label: 'Singapore (SGT)' },
+			{ value: 'Asia/Hong_Kong', label: 'Hong Kong' },
+			{ value: 'Asia/Shanghai', label: 'Shanghai (CST)' },
+			{ value: 'Asia/Tokyo', label: 'Tokyo (JST)' },
+			{ value: 'Asia/Seoul', label: 'Seoul (KST)' },
+		]},
+		{ group: 'Pacific', options: [
+			{ value: 'Australia/Sydney', label: 'Sydney (AEST/AEDT)' },
+			{ value: 'Australia/Melbourne', label: 'Melbourne' },
+			{ value: 'Australia/Perth', label: 'Perth (AWST)' },
+			{ value: 'Pacific/Auckland', label: 'Auckland (NZST/NZDT)' },
+		]},
+		{ group: 'Africa', options: [
+			{ value: 'Africa/Cairo', label: 'Cairo (EET)' },
+			{ value: 'Africa/Johannesburg', label: 'Johannesburg (SAST)' },
+			{ value: 'Africa/Lagos', label: 'Lagos (WAT)' },
+		]},
+	];
+
+	async function savePreference(key: string, value: string) {
 		savingPrefs = true;
 		message = null;
 
@@ -19,7 +66,7 @@
 			const response = await fetch('/api/user/preferences', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ weekStartDay: value })
+				body: JSON.stringify({ [key]: value })
 			});
 
 			if (!response.ok) {
@@ -32,6 +79,16 @@
 		} finally {
 			savingPrefs = false;
 		}
+	}
+
+	async function saveWeekStartDay(value: 'sunday' | 'monday') {
+		weekStartDay = value;
+		await savePreference('weekStartDay', value);
+	}
+
+	async function saveTimezone(value: string) {
+		timezone = value;
+		await savePreference('timezone', value);
 	}
 
 	async function downloadBackup() {
@@ -158,6 +215,26 @@
 		<div class="card">
 			<h2>Preferences</h2>
 			<div class="preferences-section">
+				<div class="preference-row">
+					<div class="preference-info">
+						<span class="preference-label">Timezone</span>
+						<span class="preference-description">Used for determining "today" and date displays</span>
+					</div>
+					<select
+						class="input preference-select"
+						value={timezone}
+						onchange={(e) => saveTimezone(e.currentTarget.value)}
+						disabled={savingPrefs}
+					>
+						{#each timezones as group}
+							<optgroup label={group.group}>
+								{#each group.options as option}
+									<option value={option.value}>{option.label}</option>
+								{/each}
+							</optgroup>
+						{/each}
+					</select>
+				</div>
 				<div class="preference-row">
 					<div class="preference-info">
 						<span class="preference-label">Week starts on</span>

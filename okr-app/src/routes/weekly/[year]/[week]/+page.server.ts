@@ -5,7 +5,11 @@ import { timePeriods, tasks, taskAttributes, taskTags } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { getWeekNumber, getWeekStartDate, getWeekYear, formatDate, addDays, getDayName } from '$lib/utils/week';
 
-export const load: PageServerLoad = async ({ params, locals }) => {
+export const load: PageServerLoad = async ({ params, locals, depends }) => {
+	// Register dependency for invalidation
+	depends('data:weekly');
+	depends('data:tasks');
+
 	if (!locals.user) {
 		throw redirect(302, '/login');
 	}

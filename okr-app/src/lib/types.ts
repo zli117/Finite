@@ -14,6 +14,9 @@ export interface Task {
 	completed: boolean;
 	completedAt: Date | null;
 	sortOrder: number;
+	// Time tracking
+	timeSpentMs: number;
+	timerStartedAt: Date | null;
 	createdAt: Date;
 	updatedAt: Date;
 	attributes: Record<string, string>;

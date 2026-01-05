@@ -19,7 +19,8 @@ export const GET: RequestHandler = async ({ locals }) => {
 	}
 
 	return json({
-		weekStartDay: user.weekStartDay || 'monday'
+		weekStartDay: user.weekStartDay || 'monday',
+		timezone: user.timezone || 'UTC'
 	});
 };
 
@@ -31,16 +32,29 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 
 	try {
 		const body = await request.json();
-		const { weekStartDay } = body;
+		const { weekStartDay, timezone } = body;
 
 		// Validate weekStartDay
 		if (weekStartDay && !['sunday', 'monday'].includes(weekStartDay)) {
 			return json({ error: 'Invalid weekStartDay value' }, { status: 400 });
 		}
 
+		// Validate timezone (basic check - IANA timezone format)
+		if (timezone) {
+			try {
+				// Try to use the timezone - this will throw if invalid
+				new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+			} catch {
+				return json({ error: 'Invalid timezone value' }, { status: 400 });
+			}
+		}
+
 		const updates: Record<string, unknown> = {};
 		if (weekStartDay) {
 			updates.weekStartDay = weekStartDay;
+		}
+		if (timezone) {
+			updates.timezone = timezone;
 		}
 
 		if (Object.keys(updates).length === 0) {
@@ -51,7 +65,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			.set(updates)
 			.where(eq(users.id, locals.user.id));
 
-		return json({ success: true, weekStartDay });
+		return json({ success: true, weekStartDay, timezone });
 	} catch (error) {
 		console.error('Error updating preferences:', error);
 		return json({ error: 'Failed to update preferences' }, { status: 500 });

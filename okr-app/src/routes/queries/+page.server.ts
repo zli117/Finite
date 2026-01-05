@@ -4,7 +4,10 @@ import { db } from '$lib/db/client';
 import { savedQueries } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, depends }) => {
+	// Register dependency for invalidation
+	depends('data:queries');
+
 	if (!locals.user) {
 		throw redirect(302, '/login');
 	}

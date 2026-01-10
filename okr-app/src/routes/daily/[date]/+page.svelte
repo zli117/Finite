@@ -11,9 +11,16 @@
 	let newTaskProgress = $state('');
 	let newTaskExpectedHours = $state('');
 	let newTaskTagIds = $state<string[]>([]);
-	let showNewTaskOptions = $state(false);
 	let loading = $state(false);
 	let error = $state('');
+
+	// Calculate total expected hours for the day
+	const totalExpectedHours = $derived(() => {
+		return data.tasks.reduce((sum, task) => {
+			const hours = parseFloat(task.attributes?.expected_hours || '0');
+			return sum + (isNaN(hours) ? 0 : hours);
+		}, 0);
+	});
 
 	// Format metric value for display
 	function formatMetricValue(metric: MetricDefinition, value: string | number | boolean | null): string {
@@ -264,8 +271,14 @@
 	{/if}
 
 	<div class="daily-content">
+		<!-- Tasks Card -->
 		<section class="card tasks-section">
-			<h2 class="section-title">Tasks</h2>
+			<div class="section-header">
+				<h2 class="section-title">Tasks</h2>
+				{#if totalExpectedHours() > 0}
+					<span class="total-hours">{totalExpectedHours().toFixed(1)}h planned</span>
+				{/if}
+			</div>
 
 			<TaskList
 				tasks={data.tasks}
@@ -278,141 +291,126 @@
 			/>
 
 			<form class="add-task-form" onsubmit={(e) => { e.preventDefault(); addTask(); }}>
-				<div class="add-task-main">
-					<input
-						type="text"
-						class="input"
-						placeholder="Add a new task..."
-						bind:value={newTaskTitle}
-						onkeydown={handleKeydown}
-						disabled={loading}
-					/>
-					<button
-						type="button"
-						class="btn btn-secondary btn-icon-only"
-						onclick={() => (showNewTaskOptions = !showNewTaskOptions)}
-						title="More options"
-					>
-						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-							<circle cx="12" cy="12" r="1"/>
-							<circle cx="19" cy="12" r="1"/>
-							<circle cx="5" cy="12" r="1"/>
-						</svg>
-					</button>
-					<button class="btn btn-primary" type="submit" disabled={loading || !newTaskTitle.trim()}>
-						{loading ? 'Adding...' : 'Add'}
-					</button>
-				</div>
-
-				{#if showNewTaskOptions}
-					<div class="add-task-options">
-						<div class="option-row">
-							<label class="option-label">Progress</label>
-							<input
-								type="number"
-								class="input input-sm"
-								bind:value={newTaskProgress}
-								placeholder="0"
-								min="0"
-								disabled={loading}
-							/>
-						</div>
-						<div class="option-row">
-							<label class="option-label">Expected Hours</label>
-							<input
-								type="number"
-								class="input input-sm"
-								bind:value={newTaskExpectedHours}
-								placeholder="0"
-								step="0.5"
-								min="0"
-								disabled={loading}
-							/>
-						</div>
-						<div class="option-row option-row-tags">
-							<label class="option-label">Tags</label>
-							<TagInput
-								tags={localTags}
-								selectedTagIds={newTaskTagIds}
-								onChange={(tagIds) => (newTaskTagIds = tagIds)}
-								placeholder="Search or create tags..."
-								disabled={loading}
-								allowCreate={true}
-								onCreateTag={createTag}
-							/>
-						</div>
+				<input
+					type="text"
+					class="input"
+					placeholder="Add a new task..."
+					bind:value={newTaskTitle}
+					onkeydown={handleKeydown}
+					disabled={loading}
+				/>
+				<div class="add-task-options">
+					<div class="option-row">
+						<label class="option-label" for="new-task-progress">Progress</label>
+						<input
+							id="new-task-progress"
+							type="number"
+							class="input input-sm"
+							bind:value={newTaskProgress}
+							placeholder="0"
+							min="0"
+							disabled={loading}
+						/>
 					</div>
-				{/if}
+					<div class="option-row">
+						<label class="option-label" for="new-task-hours">Expected Hours</label>
+						<input
+							id="new-task-hours"
+							type="number"
+							class="input input-sm"
+							bind:value={newTaskExpectedHours}
+							placeholder="0"
+							step="0.5"
+							min="0"
+							disabled={loading}
+						/>
+					</div>
+					<div class="option-row option-row-tags">
+						<label class="option-label">Tags</label>
+						<TagInput
+							tags={localTags}
+							selectedTagIds={newTaskTagIds}
+							onChange={(tagIds) => (newTaskTagIds = tagIds)}
+							placeholder="Search or create tags..."
+							disabled={loading}
+							allowCreate={true}
+							onCreateTag={createTag}
+						/>
+					</div>
+					<div class="option-row option-row-submit">
+						<button class="btn btn-primary" type="submit" disabled={loading || !newTaskTitle.trim()}>
+							{loading ? 'Adding...' : 'Add Task'}
+						</button>
+					</div>
+				</div>
 			</form>
+		</section>
 
-			<!-- Metrics Section (inline below tasks) -->
-			<div class="metrics-inline">
-				<div class="metrics-header">
-					<h3 class="metrics-title">Metrics</h3>
-					<a href="/daily/{data.date}/metrics" class="btn-link btn-edit-metrics">Edit</a>
-				</div>
-
-				{#if data.flexibleMetrics?.template && data.flexibleMetrics.metricsDefinition.length > 0}
-					<!-- Flexible metrics from template -->
-					<div class="metrics-grid">
-						{#each data.flexibleMetrics.metricsDefinition as metric}
-							{@const value = data.flexibleMetrics?.values[metric.name]}
-							<div class="metric-item">
-								<span class="metric-label">{metric.label}</span>
-								<span class="metric-value" class:empty={value === null || value === undefined || value === ''}>
-									{#if value !== null && value !== undefined && value !== ''}
-										{formatMetricValue(metric, value)}{metric.unit ? ` ${metric.unit}` : ''}
-									{:else}
-										-
-									{/if}
-								</span>
-							</div>
-						{/each}
-					</div>
-				{:else if data.metrics}
-					<!-- Legacy fixed metrics -->
-					<div class="metrics-grid">
-						{#if data.metrics.sleepLength}
-							<div class="metric-item">
-								<span class="metric-label">Sleep</span>
-								<span class="metric-value">{data.metrics.sleepLength}</span>
-							</div>
-						{/if}
-						{#if data.metrics.wakeUpTime}
-							<div class="metric-item">
-								<span class="metric-label">Wake Up</span>
-								<span class="metric-value">{data.metrics.wakeUpTime}</span>
-							</div>
-						{/if}
-						{#if data.metrics.steps}
-							<div class="metric-item">
-								<span class="metric-label">Steps</span>
-								<span class="metric-value">{data.metrics.steps.toLocaleString()}</span>
-							</div>
-						{/if}
-						{#if data.metrics.cardioLoad}
-							<div class="metric-item">
-								<span class="metric-label">Cardio Load</span>
-								<span class="metric-value">{data.metrics.cardioLoad}</span>
-							</div>
-						{/if}
-						{#if data.metrics.fitbitReadiness}
-							<div class="metric-item">
-								<span class="metric-label">Readiness</span>
-								<span class="metric-value">{data.metrics.fitbitReadiness}</span>
-							</div>
-						{/if}
-						{#if data.metrics.restingHeartRate}
-							<div class="metric-item">
-								<span class="metric-label">Resting HR</span>
-								<span class="metric-value">{data.metrics.restingHeartRate} bpm</span>
-							</div>
-						{/if}
-					</div>
-				{:else}
-					<p class="text-muted text-sm">No metrics recorded for this day.</p>
-				{/if}
+		<!-- Metrics Card -->
+		<section class="card metrics-section">
+			<div class="section-header">
+				<h2 class="section-title">Metrics</h2>
+				<a href="/daily/{data.date}/metrics" class="btn-link">Edit</a>
 			</div>
+
+			{#if data.flexibleMetrics?.template && data.flexibleMetrics.metricsDefinition.length > 0}
+				<div class="metrics-grid">
+					{#each data.flexibleMetrics.metricsDefinition as metric}
+						{@const value = data.flexibleMetrics?.values[metric.name]}
+						<div class="metric-item">
+							<span class="metric-label">{metric.label}</span>
+							<span class="metric-value" class:empty={value === null || value === undefined || value === ''}>
+								{#if value !== null && value !== undefined && value !== ''}
+									{formatMetricValue(metric, value)}{metric.unit ? ` ${metric.unit}` : ''}
+								{:else}
+									-
+								{/if}
+							</span>
+						</div>
+					{/each}
+				</div>
+			{:else if data.metrics}
+				<div class="metrics-grid">
+					{#if data.metrics.sleepLength}
+						<div class="metric-item">
+							<span class="metric-label">Sleep</span>
+							<span class="metric-value">{data.metrics.sleepLength}</span>
+						</div>
+					{/if}
+					{#if data.metrics.wakeUpTime}
+						<div class="metric-item">
+							<span class="metric-label">Wake Up</span>
+							<span class="metric-value">{data.metrics.wakeUpTime}</span>
+						</div>
+					{/if}
+					{#if data.metrics.steps}
+						<div class="metric-item">
+							<span class="metric-label">Steps</span>
+							<span class="metric-value">{data.metrics.steps.toLocaleString()}</span>
+						</div>
+					{/if}
+					{#if data.metrics.cardioLoad}
+						<div class="metric-item">
+							<span class="metric-label">Cardio Load</span>
+							<span class="metric-value">{data.metrics.cardioLoad}</span>
+						</div>
+					{/if}
+					{#if data.metrics.fitbitReadiness}
+						<div class="metric-item">
+							<span class="metric-label">Readiness</span>
+							<span class="metric-value">{data.metrics.fitbitReadiness}</span>
+						</div>
+					{/if}
+					{#if data.metrics.restingHeartRate}
+						<div class="metric-item">
+							<span class="metric-label">Resting HR</span>
+							<span class="metric-value">{data.metrics.restingHeartRate} bpm</span>
+						</div>
+					{/if}
+				</div>
+			{:else}
+				<p class="text-muted text-sm">No metrics recorded for this day.</p>
+			{/if}
 		</section>
 	</div>
 </div>
@@ -474,9 +472,22 @@
 		margin: 0 auto;
 	}
 
+	.section-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-bottom: var(--spacing-md);
+	}
+
 	.section-title {
 		font-size: 1.125rem;
-		margin: 0 0 var(--spacing-md);
+		margin: 0;
+	}
+
+	.total-hours {
+		font-size: 0.875rem;
+		color: var(--color-text-muted);
+		font-weight: 500;
 	}
 
 	.tasks-section {
@@ -486,33 +497,16 @@
 	.add-task-form {
 		display: flex;
 		flex-direction: column;
-		gap: var(--spacing-sm);
+		gap: var(--spacing-md);
 		margin-top: var(--spacing-md);
 		padding-top: var(--spacing-md);
 		border-top: 1px solid var(--color-border);
 	}
 
-	.add-task-main {
-		display: flex;
-		gap: var(--spacing-sm);
-	}
-
-	.add-task-main .input {
-		flex: 1;
-	}
-
-	.btn-icon-only {
-		padding: var(--spacing-sm);
-		min-width: auto;
-	}
-
 	.add-task-options {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+		grid-template-columns: repeat(3, 1fr);
 		gap: var(--spacing-sm);
-		padding: var(--spacing-sm);
-		background-color: var(--color-bg);
-		border-radius: var(--radius-sm);
 	}
 
 	.option-row {
@@ -525,6 +519,12 @@
 		grid-column: 1 / -1;
 	}
 
+	.option-row-submit {
+		grid-column: 1 / -1;
+		display: flex;
+		justify-content: flex-end;
+	}
+
 	.option-label {
 		font-size: 0.75rem;
 		color: var(--color-text-muted);
@@ -535,29 +535,9 @@
 		font-size: 0.875rem;
 	}
 
-	/* Inline metrics section */
-	.metrics-inline {
-		margin-top: var(--spacing-lg);
-		padding-top: var(--spacing-md);
-		border-top: 1px solid var(--color-border);
-	}
-
-	.metrics-header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		margin-bottom: var(--spacing-sm);
-	}
-
-	.metrics-title {
-		font-size: 1rem;
-		font-weight: 600;
-		margin: 0;
-		color: var(--color-text-muted);
-	}
-
-	.btn-edit-metrics {
-		font-size: 0.875rem;
+	/* Metrics section */
+	.metrics-section {
+		min-height: 100px;
 	}
 
 	.metrics-grid {

@@ -183,24 +183,26 @@
 	</div>
 
 	<div class="task-actions">
-		<!-- Timer button -->
-		<button
-			class="btn-icon btn-timer"
-			class:running={isTimerRunning}
-			onclick={handleTimerClick}
-			title={isTimerRunning ? 'Stop timer' : 'Start timer'}
-		>
-			{#if isTimerRunning}
-				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-					<rect x="6" y="4" width="4" height="16" rx="1"/>
-					<rect x="14" y="4" width="4" height="16" rx="1"/>
-				</svg>
-			{:else}
-				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-					<polygon points="5 3 19 12 5 21 5 3"/>
-				</svg>
-			{/if}
-		</button>
+		<!-- Timer button (only show for incomplete tasks) -->
+		{#if !task.completed}
+			<button
+				class="btn-icon btn-timer"
+				class:running={isTimerRunning}
+				onclick={handleTimerClick}
+				title={isTimerRunning ? 'Stop timer' : 'Start timer'}
+			>
+				{#if isTimerRunning}
+					<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+						<rect x="6" y="4" width="4" height="16" rx="1"/>
+						<rect x="14" y="4" width="4" height="16" rx="1"/>
+					</svg>
+				{:else}
+					<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+						<polygon points="5 3 19 12 5 21 5 3"/>
+					</svg>
+				{/if}
+			</button>
+		{/if}
 
 		<!-- Tag picker -->
 		{#if tags.length > 0}

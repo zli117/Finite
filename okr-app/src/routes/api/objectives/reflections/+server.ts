@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db/client';
 import { objectiveReflections } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, isNull } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastDataChange } from '$lib/server/events';
 
@@ -27,7 +27,7 @@ export const GET: RequestHandler = async ({ locals, url }) => {
 			eq(objectiveReflections.year, year),
 			level === 'monthly' && month !== null
 				? eq(objectiveReflections.month, month)
-				: eq(objectiveReflections.month, null)
+				: isNull(objectiveReflections.month)
 		)
 	});
 
@@ -59,7 +59,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 				eq(objectiveReflections.year, year),
 				level === 'monthly' && month
 					? eq(objectiveReflections.month, month)
-					: eq(objectiveReflections.month, null)
+					: isNull(objectiveReflections.month)
 			)
 		});
 

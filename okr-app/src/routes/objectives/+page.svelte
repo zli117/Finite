@@ -142,27 +142,30 @@
 	// Reflection state
 	let reflectionText = $state(data.reflection);
 	let reflectionSaving = $state(false);
-	let reflectionSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+	let reflectionSaved = $state(false);
+	let reflectionDirty = $state(false);
 
-	// Sync reflection when data changes (year/level switch)
+	// Track current view to detect navigation vs SSE reload
+	let lastViewKey = $state(`${data.year}-${data.level}-${data.month}`);
+
+	// Sync reflection only when year/level/month changes (navigation), not on SSE reloads
 	$effect(() => {
-		reflectionText = data.reflection;
+		const currentKey = `${data.year}-${data.level}-${data.month}`;
+		if (currentKey !== lastViewKey) {
+			reflectionText = data.reflection;
+			reflectionDirty = false;
+			reflectionSaved = false;
+			lastViewKey = currentKey;
+		}
 	});
 
-	// Debounced save for reflection
 	function handleReflectionChange(text: string) {
 		reflectionText = text;
-
-		if (reflectionSaveTimeout) {
-			clearTimeout(reflectionSaveTimeout);
-		}
-
-		reflectionSaveTimeout = setTimeout(() => {
-			saveReflection(text);
-		}, 1000);
+		reflectionDirty = true;
+		reflectionSaved = false;
 	}
 
-	async function saveReflection(text: string) {
+	async function saveReflection() {
 		reflectionSaving = true;
 		try {
 			const response = await fetch('/api/objectives/reflections', {
@@ -172,13 +175,16 @@
 					level: data.level,
 					year: data.year,
 					month: data.month,
-					reflection: text
+					reflection: reflectionText
 				})
 			});
 
 			if (!response.ok) {
 				throw new Error('Failed to save reflection');
 			}
+
+			reflectionDirty = false;
+			reflectionSaved = true;
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to save reflection';
 		} finally {
@@ -720,9 +726,18 @@
 	<section class="card reflections-section">
 		<div class="reflections-header">
 			<h2 class="section-title">Reflections</h2>
-			{#if reflectionSaving}
-				<span class="saving-indicator">Saving...</span>
-			{/if}
+			<div class="reflections-actions">
+				{#if reflectionSaved}
+					<span class="saved-indicator">Saved</span>
+				{/if}
+				<button
+					class="btn btn-primary btn-sm"
+					onclick={saveReflection}
+					disabled={reflectionSaving || !reflectionDirty}
+				>
+					{reflectionSaving ? 'Saving...' : 'Save'}
+				</button>
+			</div>
 		</div>
 		<textarea
 			class="input textarea reflections-textarea"
@@ -730,7 +745,6 @@
 			value={reflectionText}
 			oninput={(e) => handleReflectionChange(e.currentTarget.value)}
 		></textarea>
-		<p class="reflections-hint">Auto-saved as you type</p>
 	</section>
 </div>
 
@@ -1335,22 +1349,20 @@
 		margin: 0;
 	}
 
-	.saving-indicator {
+	.reflections-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--spacing-sm);
+	}
+
+	.saved-indicator {
 		font-size: 0.75rem;
-		color: var(--color-text-muted);
-		font-style: italic;
+		color: var(--color-success);
 	}
 
 	.reflections-textarea {
 		min-height: 150px;
 		resize: vertical;
 		width: 100%;
-	}
-
-	.reflections-hint {
-		font-size: 0.75rem;
-		color: var(--color-text-muted);
-		margin-top: var(--spacing-xs);
-		margin-bottom: 0;
 	}
 </style>

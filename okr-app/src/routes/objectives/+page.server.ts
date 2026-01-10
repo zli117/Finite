@@ -2,7 +2,7 @@ import { redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { db } from '$lib/db/client';
 import { objectives, keyResults, savedQueries, objectiveReflections } from '$lib/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, isNull } from 'drizzle-orm';
 
 export const load: PageServerLoad = async ({ locals, url, depends }) => {
 	// Register dependency for invalidation
@@ -93,7 +93,7 @@ export const load: PageServerLoad = async ({ locals, url, depends }) => {
 			eq(objectiveReflections.year, year),
 			level === 'monthly' && month
 				? eq(objectiveReflections.month, month)
-				: eq(objectiveReflections.month, null)
+				: isNull(objectiveReflections.month)
 		)
 	});
 

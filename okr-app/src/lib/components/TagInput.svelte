@@ -69,6 +69,14 @@
 		highlightedIndex = -1;
 	}
 
+	function handleInput() {
+		// Ensure dropdown is shown when typing
+		if (!showDropdown) {
+			showDropdown = true;
+		}
+		highlightedIndex = -1;
+	}
+
 	function handleInputBlur(e: FocusEvent) {
 		// Delay hiding to allow clicking on dropdown items
 		setTimeout(() => {
@@ -113,6 +121,8 @@
 		}
 		searchQuery = '';
 		highlightedIndex = -1;
+		// Keep dropdown open and refocus for adding more tags
+		showDropdown = true;
 		inputRef?.focus();
 	}
 
@@ -135,6 +145,8 @@
 			}
 		} finally {
 			creating = false;
+			// Keep dropdown open and refocus for adding more tags
+			showDropdown = true;
 			inputRef?.focus();
 		}
 	}
@@ -180,6 +192,7 @@
 			bind:this={inputRef}
 			onfocus={handleInputFocus}
 			onblur={handleInputBlur}
+			oninput={handleInput}
 			onkeydown={handleKeydown}
 			{placeholder}
 			{disabled}

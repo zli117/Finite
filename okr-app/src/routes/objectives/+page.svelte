@@ -10,12 +10,11 @@
 	let error = $state('');
 
 	// Local mutable state for objectives (for optimistic updates)
-	let localObjectives = $state(structuredClone(data.objectives));
-	let localOverallScore = $state(data.overallScore);
+	let localObjectives: typeof data.objectives = $state([]);
+	let localOverallScore = $state(0);
 
-	// Sync from server data when it changes (year/level switch, create/delete operations)
-	$effect(() => {
-		// This runs when data.objectives reference changes (from server reload)
+	// Initialize and sync from server data
+	$effect.pre(() => {
 		localObjectives = structuredClone(data.objectives);
 		localOverallScore = data.overallScore;
 	});
@@ -140,15 +139,15 @@
 		'July', 'August', 'September', 'October', 'November', 'December'];
 
 	// Reflection state
-	let reflectionText = $state(data.reflection);
+	let reflectionText = $state('');
 	let reflectionSaving = $state(false);
 	let reflectionSaved = $state(false);
 	let reflectionDirty = $state(false);
 
 	// Track current view to detect navigation vs SSE reload
-	let lastViewKey = $state(`${data.year}-${data.level}-${data.month}`);
+	let lastViewKey = $state('');
 
-	// Sync reflection only when year/level/month changes (navigation), not on SSE reloads
+	// Sync reflection when year/level/month changes (navigation), not on SSE reloads
 	$effect(() => {
 		const currentKey = `${data.year}-${data.level}-${data.month}`;
 		if (currentKey !== lastViewKey) {
@@ -749,11 +748,13 @@
 </div>
 
 {#if isKRModalOpen}
-	<div class="modal-overlay" onclick={closeKRModal}>
-		<div class="modal" onclick={(e) => e.stopPropagation()}>
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="modal-overlay" onclick={closeKRModal} onkeydown={(e) => e.key === 'Escape' && closeKRModal()} role="dialog" aria-modal="true" aria-labelledby="kr-modal-title">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
 			<div class="modal-header">
-				<h3>{editingKR ? 'Edit Key Result' : 'New Key Result'}</h3>
-				<button class="btn-icon" onclick={closeKRModal}>
+				<h3 id="kr-modal-title">{editingKR ? 'Edit Key Result' : 'New Key Result'}</h3>
+				<button class="btn-icon" onclick={closeKRModal} aria-label="Close modal">
 					<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 						<line x1="18" y1="6" x2="6" y2="18"/>
 						<line x1="6" y1="6" x2="18" y2="18"/>
@@ -773,7 +774,7 @@
 					</div>
 					<div class="form-group">
 						<label class="label" for="kr-hours">Expected Hours</label>
-						<input type="number" id="kr-hours" class="input" step="0.5" bind:value={krExpectedHours} placeholder="Optional" />
+						<input type="number" id="kr-hours" class="input" step="any" bind:value={krExpectedHours} placeholder="Optional" />
 					</div>
 				</div>
 
@@ -792,7 +793,7 @@
 
 				{#if krMeasurementType === 'checkboxes'}
 					<div class="form-group">
-						<label class="label">Checkbox Items</label>
+						<span class="label">Checkbox Items</span>
 						<div class="checkbox-editor">
 							{#each krCheckboxItems as item}
 								<div class="checkbox-editor-item">
@@ -801,9 +802,10 @@
 										class="input"
 										placeholder="Item label"
 										value={item.label}
+										aria-label="Checkbox item label"
 										oninput={(e) => updateCheckboxLabel(item.id, e.currentTarget.value)}
 									/>
-									<button type="button" class="btn-icon btn-icon-sm" onclick={() => removeCheckboxItem(item.id)}>
+									<button type="button" class="btn-icon btn-icon-sm" onclick={() => removeCheckboxItem(item.id)} aria-label="Remove item">
 										<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 											<line x1="18" y1="6" x2="6" y2="18"/>
 											<line x1="6" y1="6" x2="18" y2="18"/>
@@ -818,7 +820,7 @@
 
 				{#if krMeasurementType === 'custom_query'}
 					<div class="form-group">
-						<label class="label">Progress Query</label>
+						<span class="label">Progress Query</span>
 						<p class="form-hint">Write code that calls <code>progress.set(value)</code> with a value between 0 and 1.</p>
 
 						{#if data.savedQueries.length > 0}

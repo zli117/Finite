@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, sqlite } from '$lib/db/client';
+import { eq } from 'drizzle-orm';
 import {
 	objectives,
 	keyResults,
@@ -16,13 +17,18 @@ import {
 	principles,
 	objectiveReflections,
 	metricsTemplates,
-	dailyMetricValues
+	dailyMetricValues,
+	users
 } from '$lib/db/schema';
 
 interface BackupData {
 	version: number;
 	exportedAt: string;
 	userId: string;
+	preferences?: {
+		timezone?: string;
+		weekStartDay?: 'sunday' | 'monday';
+	};
 	data: {
 		values?: unknown[];
 		principles?: unknown[];
@@ -62,6 +68,20 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			return json({ error: `Unsupported backup version: ${backup.version}` }, { status: 400 });
 		}
 
+		// Helper to convert timestamp strings back to Date objects
+		const convertTimestamps = (
+			record: Record<string, unknown>,
+			fields: string[]
+		): Record<string, unknown> => {
+			const result = { ...record };
+			for (const field of fields) {
+				if (result[field] && typeof result[field] === 'string') {
+					result[field] = new Date(result[field] as string);
+				}
+			}
+			return result;
+		};
+
 		// Use a transaction for atomic restore
 		const result = sqlite.transaction(() => {
 			const stats = {
@@ -81,61 +101,98 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 				metricsTemplates: 0,
 				dailyMetricValues: 0
 			};
+			const errors: string[] = [];
 
-			// Helper to insert or update records
-			const importRecords = <T extends Record<string, unknown>>(
+			// Helper to insert records with userId override
+			const importWithUserId = <T extends Record<string, unknown>>(
 				table: Parameters<typeof db.insert>[0],
 				records: T[] | undefined,
-				key: keyof typeof stats
+				key: keyof typeof stats,
+				timestampFields: string[] = ['createdAt', 'updatedAt']
 			) => {
 				if (!records || records.length === 0) return;
 
 				for (const record of records) {
-					// Override userId to current user
-					const data = { ...record, userId };
+					const data = convertTimestamps({ ...record, userId }, timestampFields);
 
 					try {
 						db.insert(table).values(data as never).onConflictDoNothing().run();
 						stats[key]++;
-					} catch {
-						// Skip records that fail (likely duplicates)
+					} catch (err) {
+						errors.push(`${key}: ${err instanceof Error ? err.message : 'Unknown error'}`);
 					}
 				}
 			};
 
-			// Delete existing data first (optional - for clean restore)
-			// Uncomment these lines if you want restore to replace all data:
-			// db.delete(taskTags).where(eq(taskTags.userId, userId)).run();
-			// db.delete(taskAttributes).where(eq(taskAttributes.userId, userId)).run();
-			// db.delete(tasks).where(eq(tasks.userId, userId)).run();
-			// ... etc
+			// Helper to insert records WITHOUT userId override (for child tables)
+			const importWithoutUserId = <T extends Record<string, unknown>>(
+				table: Parameters<typeof db.insert>[0],
+				records: T[] | undefined,
+				key: keyof typeof stats,
+				timestampFields: string[] = ['createdAt', 'updatedAt']
+			) => {
+				if (!records || records.length === 0) return;
+
+				for (const record of records) {
+					const data = convertTimestamps({ ...record }, timestampFields);
+
+					try {
+						db.insert(table).values(data as never).onConflictDoNothing().run();
+						stats[key]++;
+					} catch (err) {
+						errors.push(`${key}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+					}
+				}
+			};
 
 			// Import in correct order (respecting foreign keys)
-			importRecords(values, backup.data.values as never[], 'values');
-			importRecords(principles, backup.data.principles as never[], 'principles');
-			importRecords(objectives, backup.data.objectives as never[], 'objectives');
-			importRecords(keyResults, backup.data.keyResults as never[], 'keyResults');
-			importRecords(timePeriods, backup.data.timePeriods as never[], 'timePeriods');
-			importRecords(tags, backup.data.tags as never[], 'tags');
-			importRecords(tasks, backup.data.tasks as never[], 'tasks');
-			importRecords(taskAttributes, backup.data.taskAttributes as never[], 'taskAttributes');
-			importRecords(taskTags, backup.data.taskTags as never[], 'taskTags');
-			importRecords(dailyMetrics, backup.data.dailyMetrics as never[], 'dailyMetrics');
-			importRecords(savedQueries, backup.data.savedQueries as never[], 'savedQueries');
-			importRecords(
+			// Tables with userId column
+			importWithUserId(values, backup.data.values as never[], 'values');
+			importWithUserId(principles, backup.data.principles as never[], 'principles');
+			importWithUserId(objectives, backup.data.objectives as never[], 'objectives');
+			importWithUserId(timePeriods, backup.data.timePeriods as never[], 'timePeriods');
+			importWithUserId(tags, backup.data.tags as never[], 'tags');
+			importWithUserId(tasks, backup.data.tasks as never[], 'tasks', [
+				'createdAt',
+				'updatedAt',
+				'completedAt',
+				'timerStartedAt'
+			]);
+			importWithUserId(dailyMetrics, backup.data.dailyMetrics as never[], 'dailyMetrics', []);
+			importWithUserId(savedQueries, backup.data.savedQueries as never[], 'savedQueries');
+			importWithUserId(
 				objectiveReflections,
 				backup.data.objectiveReflections as never[],
 				'objectiveReflections'
 			);
-			importRecords(metricsTemplates, backup.data.metricsTemplates as never[], 'metricsTemplates');
-			importRecords(
-				dailyMetricValues,
-				backup.data.dailyMetricValues as never[],
-				'dailyMetricValues'
-			);
+			importWithUserId(metricsTemplates, backup.data.metricsTemplates as never[], 'metricsTemplates');
+			importWithUserId(dailyMetricValues, backup.data.dailyMetricValues as never[], 'dailyMetricValues', []);
+
+			// Tables WITHOUT userId column (linked via foreign keys)
+			importWithoutUserId(keyResults, backup.data.keyResults as never[], 'keyResults');
+			importWithoutUserId(taskAttributes, backup.data.taskAttributes as never[], 'taskAttributes', []);
+			importWithoutUserId(taskTags, backup.data.taskTags as never[], 'taskTags', []);
 
 			// Skip plugins - credentials should be reconfigured
-			// importRecords(plugins, backup.data.plugins as never[], 'plugins');
+			// importWithUserId(plugins, backup.data.plugins as never[], 'plugins');
+
+			// Restore user preferences if present
+			if (backup.preferences) {
+				const updates: { timezone?: string; weekStartDay?: 'sunday' | 'monday' } = {};
+				if (backup.preferences.timezone) {
+					updates.timezone = backup.preferences.timezone;
+				}
+				if (backup.preferences.weekStartDay) {
+					updates.weekStartDay = backup.preferences.weekStartDay;
+				}
+				if (Object.keys(updates).length > 0) {
+					db.update(users).set(updates).where(eq(users.id, userId)).run();
+				}
+			}
+
+			if (errors.length > 0) {
+				console.error('Restore errors:', errors.slice(0, 10));
+			}
 
 			return stats;
 		})();

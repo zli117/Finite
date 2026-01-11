@@ -15,7 +15,7 @@
 	let error = $state('');
 
 	// Store local tags state for inline creation
-	let localTags = $state<Tag[]>(data.tags || []);
+	let localTags = $state<Tag[]>([]);
 
 	// Keep local tags in sync with server data
 	$effect(() => {
@@ -356,13 +356,13 @@
 						class="input input-sm"
 						bind:value={newInitiativeExpectedHours}
 						placeholder="0"
-						step="0.5"
+						step="any"
 						min="0"
 						disabled={initiativeLoading}
 					/>
 				</div>
 				<div class="option-row option-row-tags">
-					<label class="option-label">Tags</label>
+					<span class="option-label">Tags</span>
 					<TagInput
 						tags={localTags}
 						selectedTagIds={newInitiativeTagIds}

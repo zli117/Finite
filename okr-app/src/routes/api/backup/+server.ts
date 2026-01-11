@@ -16,7 +16,8 @@ import {
 	principles,
 	objectiveReflections,
 	metricsTemplates,
-	dailyMetricValues
+	dailyMetricValues,
+	users
 } from '$lib/db/schema';
 import { eq, inArray } from 'drizzle-orm';
 
@@ -29,6 +30,11 @@ export const GET: RequestHandler = async ({ locals }) => {
 	const userId = locals.user.id;
 
 	try {
+		// Fetch user preferences
+		const user = await db.query.users.findFirst({
+			where: eq(users.id, userId)
+		});
+
 		// Fetch parent data first
 		const userObjectives = await db.query.objectives.findMany({
 			where: eq(objectives.userId, userId)
@@ -45,6 +51,10 @@ export const GET: RequestHandler = async ({ locals }) => {
 			version: 1,
 			exportedAt: new Date().toISOString(),
 			userId: userId,
+			preferences: {
+				timezone: user?.timezone ?? 'UTC',
+				weekStartDay: user?.weekStartDay ?? 'monday'
+			},
 			data: {
 				values: await db.query.values.findMany({
 					where: eq(values.userId, userId)

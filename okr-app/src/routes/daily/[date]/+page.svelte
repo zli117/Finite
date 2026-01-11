@@ -468,7 +468,7 @@
 							class="input input-sm"
 							bind:value={newTaskExpectedHours}
 							placeholder="0"
-							step="0.5"
+							step="any"
 							min="0"
 							disabled={loading}
 						/>
@@ -609,7 +609,7 @@
 							class="input input-sm"
 							bind:value={newInitiativeExpectedHours}
 							placeholder="0"
-							step="0.5"
+							step="any"
 							min="0"
 							disabled={initiativeLoading}
 						/>

@@ -304,7 +304,7 @@
 					bind:value={editExpectedHours}
 					onkeydown={handleKeydown}
 					placeholder="0"
-					step="0.5"
+					step="any"
 					min="0"
 				/>
 			</div>

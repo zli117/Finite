@@ -6,6 +6,7 @@ Operations guide for deploying, maintaining, and backing up the OKR Tracker.
 
 - [Deployment](#deployment)
 - [HTTPS Setup](#https-setup)
+- [Multiple Services](#multiple-services)
 - [Database Backup](#database-backup)
 - [Nextcloud Integration](#nextcloud-integration)
 - [Raspberry Pi Deployment](#raspberry-pi-deployment)
@@ -180,6 +181,216 @@ EOF
 sudo cloudflared service install
 sudo systemctl start cloudflared
 ```
+
+---
+
+## Multiple Services
+
+Run multiple services behind a single reverse proxy. One Caddy/Nginx instance handles HTTPS for all your apps.
+
+### Caddy: Multiple Domains
+
+```
+# /etc/caddy/Caddyfile
+
+okr.yourdomain.com {
+    reverse_proxy localhost:3000
+}
+
+nextcloud.yourdomain.com {
+    reverse_proxy localhost:8080
+}
+
+homeassistant.yourdomain.com {
+    reverse_proxy localhost:8123
+}
+
+grafana.yourdomain.com {
+    reverse_proxy localhost:3001
+}
+```
+
+Caddy automatically obtains and renews SSL certificates for each domain.
+
+### Caddy: Path-Based Routing (Single Domain)
+
+```
+# /etc/caddy/Caddyfile
+
+yourdomain.com {
+    # OKR Tracker at /okr
+    handle /okr/* {
+        uri strip_prefix /okr
+        reverse_proxy localhost:3000
+    }
+
+    # Grafana at /grafana
+    handle /grafana/* {
+        reverse_proxy localhost:3001
+    }
+
+    # Default - Home Assistant
+    handle {
+        reverse_proxy localhost:8123
+    }
+}
+```
+
+**Note:** Path-based routing requires apps to support running under a subpath. OKR Tracker needs `ORIGIN=https://yourdomain.com/okr` in this case.
+
+### Nginx: Multiple Domains
+
+```nginx
+# /etc/nginx/sites-available/okr
+server {
+    listen 443 ssl http2;
+    server_name okr.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/okr.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/okr.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# /etc/nginx/sites-available/nextcloud
+server {
+    listen 443 ssl http2;
+    server_name nextcloud.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/nextcloud.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/nextcloud.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 10G;  # For file uploads
+    }
+}
+```
+
+Get certificates for each domain:
+```bash
+sudo certbot --nginx -d okr.yourdomain.com
+sudo certbot --nginx -d nextcloud.yourdomain.com
+```
+
+### Nginx: Wildcard Certificate
+
+Use a single wildcard certificate for all subdomains:
+
+```bash
+# Get wildcard cert (requires DNS challenge)
+sudo certbot certonly --manual --preferred-challenges dns \
+    -d "yourdomain.com" -d "*.yourdomain.com"
+```
+
+Then reference the wildcard cert in all server blocks:
+```nginx
+ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+```
+
+### Cloudflare Tunnel: Multiple Services
+
+```yaml
+# ~/.cloudflared/config.yml
+tunnel: <TUNNEL_ID>
+credentials-file: /home/youruser/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: okr.yourdomain.com
+    service: http://localhost:3000
+  - hostname: nextcloud.yourdomain.com
+    service: http://localhost:8080
+  - hostname: homeassistant.yourdomain.com
+    service: http://localhost:8123
+  - service: http_status:404
+```
+
+### Tailscale: Multiple Services
+
+With Tailscale Serve, expose multiple services:
+
+```bash
+# Serve OKR on port 443 (default)
+tailscale serve https / http://localhost:3000
+
+# Or use different paths
+tailscale serve https /okr http://localhost:3000
+tailscale serve https /grafana http://localhost:3001
+```
+
+### Docker Compose: All Services Together
+
+```yaml
+# docker-compose.yml
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
+  okr:
+    build: ./okr-tracker
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      - ./okr-data:/app/data
+    environment:
+      - ORIGIN=https://okr.yourdomain.com
+
+  nextcloud:
+    image: nextcloud
+    restart: unless-stopped
+    expose:
+      - "80"
+    volumes:
+      - ./nextcloud-data:/var/www/html
+
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+With Caddyfile:
+```
+okr.yourdomain.com {
+    reverse_proxy okr:3000
+}
+
+nextcloud.yourdomain.com {
+    reverse_proxy nextcloud:80
+}
+```
+
+### Port Allocation Reference
+
+Keep track of which ports your services use:
+
+| Service | Port | Domain |
+|---------|------|--------|
+| OKR Tracker | 3000 | okr.yourdomain.com |
+| Nextcloud | 8080 | nextcloud.yourdomain.com |
+| Home Assistant | 8123 | ha.yourdomain.com |
+| Grafana | 3001 | grafana.yourdomain.com |
+| Portainer | 9000 | portainer.yourdomain.com |
 
 ---
 

@@ -15,6 +15,13 @@
       "when": 1768080734739,
       "tag": "0001_lucky_jetstream",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1768088430320,
+      "tag": "0002_red_alice",
+      "breakpoints": true
     }
   ]
 }

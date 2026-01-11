@@ -13,9 +13,11 @@ import {
 	savedQueries,
 	plugins,
 	values,
-	principles
+	principles,
+	objectiveReflections,
+	metricsTemplates,
+	dailyMetricValues
 } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
 
 interface BackupData {
 	version: number;
@@ -34,6 +36,9 @@ interface BackupData {
 		dailyMetrics?: unknown[];
 		savedQueries?: unknown[];
 		plugins?: unknown[];
+		objectiveReflections?: unknown[];
+		metricsTemplates?: unknown[];
+		dailyMetricValues?: unknown[];
 	};
 }
 
@@ -71,7 +76,10 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 				taskTags: 0,
 				dailyMetrics: 0,
 				savedQueries: 0,
-				plugins: 0
+				plugins: 0,
+				objectiveReflections: 0,
+				metricsTemplates: 0,
+				dailyMetricValues: 0
 			};
 
 			// Helper to insert or update records
@@ -114,6 +122,17 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			importRecords(taskTags, backup.data.taskTags as never[], 'taskTags');
 			importRecords(dailyMetrics, backup.data.dailyMetrics as never[], 'dailyMetrics');
 			importRecords(savedQueries, backup.data.savedQueries as never[], 'savedQueries');
+			importRecords(
+				objectiveReflections,
+				backup.data.objectiveReflections as never[],
+				'objectiveReflections'
+			);
+			importRecords(metricsTemplates, backup.data.metricsTemplates as never[], 'metricsTemplates');
+			importRecords(
+				dailyMetricValues,
+				backup.data.dailyMetricValues as never[],
+				'dailyMetricValues'
+			);
 
 			// Skip plugins - credentials should be reconfigured
 			// importRecords(plugins, backup.data.plugins as never[], 'plugins');

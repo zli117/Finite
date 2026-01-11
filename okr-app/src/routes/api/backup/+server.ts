@@ -2,7 +2,6 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/db/client';
 import {
-	users,
 	objectives,
 	keyResults,
 	timePeriods,
@@ -14,9 +13,12 @@ import {
 	savedQueries,
 	plugins,
 	values,
-	principles
+	principles,
+	objectiveReflections,
+	metricsTemplates,
+	dailyMetricValues
 } from '$lib/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 
 // GET /api/backup - Create a backup of user's data
 export const GET: RequestHandler = async ({ locals }) => {
@@ -27,6 +29,17 @@ export const GET: RequestHandler = async ({ locals }) => {
 	const userId = locals.user.id;
 
 	try {
+		// Fetch parent data first
+		const userObjectives = await db.query.objectives.findMany({
+			where: eq(objectives.userId, userId)
+		});
+		const objectiveIds = userObjectives.map((o) => o.id);
+
+		const userTasks = await db.query.tasks.findMany({
+			where: eq(tasks.userId, userId)
+		});
+		const taskIds = userTasks.map((t) => t.id);
+
 		// Fetch all user data
 		const backup = {
 			version: 1,
@@ -39,27 +52,32 @@ export const GET: RequestHandler = async ({ locals }) => {
 				principles: await db.query.principles.findMany({
 					where: eq(principles.userId, userId)
 				}),
-				objectives: await db.query.objectives.findMany({
-					where: eq(objectives.userId, userId)
-				}),
-				keyResults: await db.query.keyResults.findMany({
-					where: eq(keyResults.userId, userId)
-				}),
+				objectives: userObjectives,
+				keyResults:
+					objectiveIds.length > 0
+						? await db.query.keyResults.findMany({
+								where: inArray(keyResults.objectiveId, objectiveIds)
+							})
+						: [],
 				timePeriods: await db.query.timePeriods.findMany({
 					where: eq(timePeriods.userId, userId)
 				}),
-				tasks: await db.query.tasks.findMany({
-					where: eq(tasks.userId, userId)
-				}),
-				taskAttributes: await db.query.taskAttributes.findMany({
-					where: eq(taskAttributes.userId, userId)
-				}),
+				tasks: userTasks,
+				taskAttributes:
+					taskIds.length > 0
+						? await db.query.taskAttributes.findMany({
+								where: inArray(taskAttributes.taskId, taskIds)
+							})
+						: [],
 				tags: await db.query.tags.findMany({
 					where: eq(tags.userId, userId)
 				}),
-				taskTags: await db.query.taskTags.findMany({
-					where: eq(taskTags.userId, userId)
-				}),
+				taskTags:
+					taskIds.length > 0
+						? await db.query.taskTags.findMany({
+								where: inArray(taskTags.taskId, taskIds)
+							})
+						: [],
 				dailyMetrics: await db.query.dailyMetrics.findMany({
 					where: eq(dailyMetrics.userId, userId)
 				}),
@@ -68,6 +86,15 @@ export const GET: RequestHandler = async ({ locals }) => {
 				}),
 				plugins: await db.query.plugins.findMany({
 					where: eq(plugins.userId, userId)
+				}),
+				objectiveReflections: await db.query.objectiveReflections.findMany({
+					where: eq(objectiveReflections.userId, userId)
+				}),
+				metricsTemplates: await db.query.metricsTemplates.findMany({
+					where: eq(metricsTemplates.userId, userId)
+				}),
+				dailyMetricValues: await db.query.dailyMetricValues.findMany({
+					where: eq(dailyMetricValues.userId, userId)
 				})
 			}
 		};

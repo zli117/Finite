@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // Users table for multi-user support
 export const users = sqliteTable('users', {
@@ -214,16 +214,26 @@ export const dailyMetricValues = sqliteTable('daily_metric_values', {
 });
 
 // Objective reflections (for yearly/monthly objective pages)
-export const objectiveReflections = sqliteTable('objective_reflections', {
-	id: text('id').primaryKey(),
-	userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-	level: text('level', { enum: ['yearly', 'monthly'] }).notNull(),
-	year: integer('year').notNull(),
-	month: integer('month'), // null for yearly
-	reflection: text('reflection').notNull().default(''),
-	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
-	updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
-});
+export const objectiveReflections = sqliteTable(
+	'objective_reflections',
+	{
+		id: text('id').primaryKey(),
+		userId: text('user_id')
+			.notNull()
+			.references(() => users.id, { onDelete: 'cascade' }),
+		level: text('level', { enum: ['yearly', 'monthly'] }).notNull(),
+		year: integer('year').notNull(),
+		month: integer('month'), // null for yearly
+		reflection: text('reflection').notNull().default(''),
+		createdAt: integer('created_at', { mode: 'timestamp' })
+			.notNull()
+			.$defaultFn(() => new Date()),
+		updatedAt: integer('updated_at', { mode: 'timestamp' })
+			.notNull()
+			.$defaultFn(() => new Date())
+	},
+	(table) => [uniqueIndex('objective_reflections_unique').on(table.userId, table.level, table.year, table.month)]
+);
 
 // Type exports for use in the application
 export type User = typeof users.$inferSelect;

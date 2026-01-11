@@ -80,15 +80,10 @@ export async function executeQuery(
 	let progressValue: number | undefined = undefined;
 
 	try {
-		// Security: Freeze Object.prototype to prevent prototype pollution
-		context.evalCode(`
-			Object.freeze(Object.prototype);
-			Object.freeze(Array.prototype);
-			Object.freeze(Function.prototype);
-			Object.freeze(String.prototype);
-			Object.freeze(Number.prototype);
-			Object.freeze(Boolean.prototype);
-		`);
+		// Note: We don't freeze prototypes in the sandbox because:
+		// 1. QuickJS sandbox is already completely isolated from Node.js runtime
+		// 2. Freezing prototypes can interfere with QuickJS's internal operations
+		// 3. Any prototype pollution stays contained within the disposable sandbox
 
 		// Build the query API and inject it into the context
 		await injectQueryAPI(context, userId);

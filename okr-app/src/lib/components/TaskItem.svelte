@@ -11,9 +11,10 @@
 		onTimerToggle?: (id: string, action: 'start' | 'stop') => void;
 		onCreateTag?: (name: string) => Promise<Tag | null>;
 		hideTimer?: boolean;
+		readOnly?: boolean;
 	}
 
-	let { task, tags = [], onToggle, onUpdate, onDelete, onTimerToggle, onCreateTag, hideTimer = false }: Props = $props();
+	let { task, tags = [], onToggle, onUpdate, onDelete, onTimerToggle, onCreateTag, hideTimer = false, readOnly = false }: Props = $props();
 
 	let editing = $state(false);
 	let editTitle = $state(task.title);
@@ -151,13 +152,23 @@
 	);
 </script>
 
-<div class="task-item" class:task-completed={task.completed}>
-	<input
-		type="checkbox"
-		class="task-checkbox"
-		checked={task.completed}
-		onchange={handleToggle}
-	/>
+<div class="task-item" class:task-completed={task.completed} class:task-readonly={readOnly}>
+	{#if readOnly}
+		<span class="task-checkbox-display" class:checked={task.completed}>
+			{#if task.completed}
+				<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+					<polyline points="20 6 9 17 4 12"/>
+				</svg>
+			{/if}
+		</span>
+	{:else}
+		<input
+			type="checkbox"
+			class="task-checkbox"
+			checked={task.completed}
+			onchange={handleToggle}
+		/>
+	{/if}
 
 	<div class="task-content">
 		<span class="task-title">
@@ -200,66 +211,68 @@
 		</div>
 	</div>
 
-	<div class="task-actions">
-		<!-- Timer button (only show for incomplete tasks, unless hideTimer is true) -->
-		{#if !task.completed && !hideTimer && onTimerToggle}
-			<button
-				class="btn-icon btn-timer"
-				class:running={isTimerRunning}
-				onclick={handleTimerClick}
-				title={isTimerRunning ? 'Stop timer' : 'Start timer'}
-			>
-				{#if isTimerRunning}
-					<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-						<rect x="6" y="4" width="4" height="16" rx="1"/>
-						<rect x="14" y="4" width="4" height="16" rx="1"/>
-					</svg>
-				{:else}
-					<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-						<polygon points="5 3 19 12 5 21 5 3"/>
-					</svg>
-				{/if}
-			</button>
-		{/if}
+	{#if !readOnly}
+		<div class="task-actions">
+			<!-- Timer button (only show for incomplete tasks, unless hideTimer is true) -->
+			{#if !task.completed && !hideTimer && onTimerToggle}
+				<button
+					class="btn-icon btn-timer"
+					class:running={isTimerRunning}
+					onclick={handleTimerClick}
+					title={isTimerRunning ? 'Stop timer' : 'Start timer'}
+				>
+					{#if isTimerRunning}
+						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+							<rect x="6" y="4" width="4" height="16" rx="1"/>
+							<rect x="14" y="4" width="4" height="16" rx="1"/>
+						</svg>
+					{:else}
+						<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+							<polygon points="5 3 19 12 5 21 5 3"/>
+						</svg>
+					{/if}
+				</button>
+			{/if}
 
-		<!-- Tag picker -->
-		{#if tags.length > 0}
+			<!-- Tag picker -->
+			{#if tags.length > 0}
+				<button
+					class="btn-icon"
+					onclick={() => (showTagPicker = !showTagPicker)}
+					title="Manage tags"
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+						<line x1="7" y1="7" x2="7.01" y2="7"/>
+					</svg>
+				</button>
+			{/if}
+
 			<button
 				class="btn-icon"
-				onclick={() => (showTagPicker = !showTagPicker)}
-				title="Manage tags"
+				onclick={() => (editing = !editing)}
+				title="Edit task"
 			>
 				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
-					<line x1="7" y1="7" x2="7.01" y2="7"/>
+					<path d="M12 20h9"/>
+					<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
 				</svg>
 			</button>
-		{/if}
-
-		<button
-			class="btn-icon"
-			onclick={() => (editing = !editing)}
-			title="Edit task"
-		>
-			<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<path d="M12 20h9"/>
-				<path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-			</svg>
-		</button>
-		<button
-			class="btn-icon btn-icon-danger"
-			onclick={() => onDelete(task.id)}
-			title="Delete task"
-		>
-			<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-				<polyline points="3 6 5 6 21 6"/>
-				<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-			</svg>
-		</button>
-	</div>
+			<button
+				class="btn-icon btn-icon-danger"
+				onclick={() => onDelete(task.id)}
+				title="Delete task"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<polyline points="3 6 5 6 21 6"/>
+					<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+				</svg>
+			</button>
+		</div>
+	{/if}
 </div>
 
-{#if showTagPicker}
+{#if showTagPicker && !readOnly}
 	<div class="task-tag-picker">
 		<TagInput
 			{tags}
@@ -272,7 +285,7 @@
 	</div>
 {/if}
 
-{#if editing}
+{#if editing && !readOnly}
 	<div class="task-edit-panel">
 		<div class="edit-row edit-row-title">
 			<label class="label">Title</label>
@@ -341,6 +354,26 @@
 		flex-shrink: 0;
 		cursor: pointer;
 		accent-color: var(--color-primary);
+	}
+
+	.task-checkbox-display {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		margin: 0;
+		margin-top: 2px;
+		flex-shrink: 0;
+		border: 2px solid var(--color-border);
+		border-radius: 3px;
+		background-color: var(--color-surface);
+	}
+
+	.task-checkbox-display.checked {
+		background-color: var(--color-primary);
+		border-color: var(--color-primary);
+		color: white;
 	}
 
 	.task-content {

@@ -12,9 +12,10 @@
 		onCreateTag?: (name: string) => Promise<Tag | null>;
 		hideTimer?: boolean;
 		emptyMessage?: string;
+		readOnly?: boolean;
 	}
 
-	let { tasks, tags = [], onToggle, onUpdate, onDelete, onTimerToggle, onCreateTag, hideTimer = false, emptyMessage = 'No tasks yet. Add one below!' }: Props = $props();
+	let { tasks, tags = [], onToggle, onUpdate, onDelete, onTimerToggle, onCreateTag, hideTimer = false, emptyMessage = 'No tasks yet. Add one below!', readOnly = false }: Props = $props();
 
 	const completedTasks = $derived(tasks.filter((t) => t.completed));
 	const pendingTasks = $derived(tasks.filter((t) => !t.completed));
@@ -39,7 +40,7 @@
 		<ul class="task-list">
 			{#each pendingTasks as task (task.id)}
 				<li>
-					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} {onCreateTag} {hideTimer} />
+					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} {onCreateTag} {hideTimer} {readOnly} />
 				</li>
 			{/each}
 			{#if completedTasks.length > 0 && pendingTasks.length > 0}
@@ -49,7 +50,7 @@
 			{/if}
 			{#each completedTasks as task (task.id)}
 				<li>
-					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} {onCreateTag} {hideTimer} />
+					<TaskItem {task} {tags} {onToggle} {onUpdate} {onDelete} {onTimerToggle} {onCreateTag} {hideTimer} {readOnly} />
 				</li>
 			{/each}
 		</ul>

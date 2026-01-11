@@ -235,6 +235,33 @@ export const objectiveReflections = sqliteTable(
 	(table) => [uniqueIndex('objective_reflections_unique').on(table.userId, table.level, table.year, table.month)]
 );
 
+// Friend requests
+export const friendRequests = sqliteTable('friend_requests', {
+	id: text('id').primaryKey(),
+	fromUserId: text('from_user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	toUserId: text('to_user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	status: text('status', { enum: ['pending', 'accepted', 'declined'] }).notNull().default('pending'),
+	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
+	respondedAt: integer('responded_at', { mode: 'timestamp' })
+});
+
+// Friendships (mutual - for querying, userId1 < userId2 convention to prevent duplicates)
+export const friendships = sqliteTable('friendships', {
+	id: text('id').primaryKey(),
+	userId1: text('user_id_1').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	userId2: text('user_id_2').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
+// Private notes about friends (only visible to the author)
+export const friendNotes = sqliteTable('friend_notes', {
+	id: text('id').primaryKey(),
+	userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	friendId: text('friend_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	note: text('note').notNull().default(''),
+	updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
+});
+
 // Type exports for use in the application
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
@@ -251,6 +278,9 @@ export type DashboardWidget = typeof dashboardWidgets.$inferSelect;
 export type MetricsTemplate = typeof metricsTemplates.$inferSelect;
 export type DailyMetricValue = typeof dailyMetricValues.$inferSelect;
 export type ObjectiveReflection = typeof objectiveReflections.$inferSelect;
+export type FriendRequest = typeof friendRequests.$inferSelect;
+export type Friendship = typeof friendships.$inferSelect;
+export type FriendNote = typeof friendNotes.$inferSelect;
 
 // Metric definition types for template configuration
 export interface MetricDefinition {

@@ -41,7 +41,7 @@ Create a `.env` file:
 
 ```env
 # Admin user (optional) - this username becomes admin on login
-ADMIN_USERNAME=admin
+ADMIN_USERNAME=youruser
 
 # Fitbit OAuth (optional)
 FITBIT_CLIENT_ID=your_client_id
@@ -57,7 +57,7 @@ The admin dashboard provides user management and security monitoring.
 Set the `ADMIN_USERNAME` environment variable to the username that should have admin privileges:
 
 ```env
-ADMIN_USERNAME=myusername
+ADMIN_USERNAME=youruser
 ```
 
 When that user logs in, they are automatically granted admin status.
@@ -99,7 +99,7 @@ When that user logs in, they are automatically granted admin status.
 docker compose up -d
 
 # With admin user
-ADMIN_USERNAME=admin docker compose up -d
+ADMIN_USERNAME=youruser docker compose up -d
 ```
 
 ### Manual

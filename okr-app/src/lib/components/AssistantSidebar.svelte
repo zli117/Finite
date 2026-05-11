@@ -55,25 +55,18 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<button
-	class="assistant-fab"
-	class:assistant-fab-open={open}
-	onclick={toggle}
-	title={open ? 'Hide AI Assistant (Esc)' : 'Open AI Assistant (Ctrl+J)'}
-	aria-label="Toggle AI Assistant"
->
-	{#if open}
-		<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-			<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-		</svg>
-	{:else}
+{#if !open}
+	<button
+		class="assistant-fab"
+		onclick={toggle}
+		title="Open AI Assistant (Ctrl+J)"
+		aria-label="Open AI Assistant"
+	>
 		<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 			<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
 		</svg>
-	{/if}
-</button>
-
-{#if open}
+	</button>
+{:else}
 	<aside class="assistant-panel" aria-label="AI Assistant">
 		<AiChat
 			hasConfig={hasAiConfig}
@@ -82,6 +75,7 @@
 			{providerModels}
 			context="assistant"
 			contextData={{ page: pageContext }}
+			onClose={() => (open = false)}
 		/>
 	</aside>
 {/if}
@@ -109,10 +103,6 @@
 	.assistant-fab:hover {
 		transform: translateY(-1px);
 		box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
-	}
-
-	.assistant-fab-open {
-		background: var(--color-text-muted, #6b7280);
 	}
 
 	.assistant-panel {

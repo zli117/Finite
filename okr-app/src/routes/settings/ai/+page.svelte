@@ -22,6 +22,12 @@
 	let customSystemPrompt = $derived(customSystemPromptOverride ?? data.aiConfig?.customSystemPrompt ?? '');
 	let showPromptEditor = $state(false);
 
+	let maxAgentRoundsOverride = $state<number | null>(null);
+	let maxAgentRoundsInput = $derived(
+		maxAgentRoundsOverride ?? data.aiConfig?.maxAgentRounds ?? 20
+	);
+	let savingMaxRounds = $state(false);
+
 	let saving = $state<Record<string, boolean>>({});
 	let deleting = $state<Record<string, boolean>>({});
 	let testing = $state<Record<string, boolean>>({});
@@ -265,6 +271,32 @@
 	function resetPrompt() {
 		customSystemPromptOverride = '';
 	}
+
+	async function saveMaxAgentRounds() {
+		savingMaxRounds = true;
+		message = null;
+		try {
+			const rounds = Math.max(1, Math.min(200, Math.floor(Number(maxAgentRoundsInput) || 20)));
+			const response = await fetch('/api/ai/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ maxAgentRounds: rounds })
+			});
+			if (!response.ok) {
+				const result = await response.json();
+				throw new Error(result.error || 'Failed to save');
+			}
+			maxAgentRoundsOverride = rounds;
+			message = { type: 'success', text: `Max agent rounds set to ${rounds}` };
+		} catch (error) {
+			message = {
+				type: 'error',
+				text: error instanceof Error ? error.message : 'Failed to save agent rounds'
+			};
+		} finally {
+			savingMaxRounds = false;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -441,6 +473,47 @@
 				</div>
 			</details>
 		{/each}
+
+		<h2 class="section-heading">Agent</h2>
+
+		<details class="provider-section">
+			<summary class="provider-header">
+				<div class="provider-title">
+					<span class="provider-name">Max Agent Rounds</span>
+					<span class="provider-summary">
+						{data.aiConfig?.maxAgentRounds ?? 20} step{(data.aiConfig?.maxAgentRounds ?? 20) === 1 ? '' : 's'}
+					</span>
+				</div>
+				<svg class="chevron" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M6 9l6 6 6-6"/>
+				</svg>
+			</summary>
+			<div class="provider-body">
+				<p class="text-muted">
+					Cap on how many tool calls the assistant can chain in one turn before stopping and asking you to continue. One read or write tool call counts as one round. Higher = the agent can complete longer multi-step tasks autonomously, but uses more API calls. Default 20, max 200.
+				</p>
+				<div class="field-row">
+					<label class="field-label" for="max-agent-rounds-input">Rounds</label>
+					<input
+						id="max-agent-rounds-input"
+						type="number"
+						min="1"
+						max="200"
+						step="1"
+						bind:value={maxAgentRoundsInput}
+						class="text-input"
+						style="width: 8rem"
+					/>
+					<button
+						class="btn btn-primary btn-sm"
+						onclick={saveMaxAgentRounds}
+						disabled={savingMaxRounds}
+					>
+						{savingMaxRounds ? 'Saving…' : 'Save'}
+					</button>
+				</div>
+			</div>
+		</details>
 
 		<h2 class="section-heading">System Prompt</h2>
 

@@ -52,7 +52,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 			? {
 					provider: config.provider,
 					providersConfig: maskedProvidersConfig,
-					customSystemPrompt: config.customSystemPrompt
+					customSystemPrompt: config.customSystemPrompt,
+					maxAgentRounds: config.maxAgentRounds
 				}
 			: null,
 		providerDefaults: PROVIDER_DEFAULTS,

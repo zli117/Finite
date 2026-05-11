@@ -78,13 +78,15 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			providerConfig,
 			deleteProvider,
 			clearApiKey,
-			customSystemPrompt
+			customSystemPrompt,
+			maxAgentRounds
 		} = body as {
 			provider?: AiProvider;
 			providerConfig?: { apiKey?: string; models?: string[]; baseUrl?: string };
 			deleteProvider?: AiProvider;
 			clearApiKey?: AiProvider;
 			customSystemPrompt?: string | null;
+			maxAgentRounds?: number;
 		};
 
 		// Get existing config
@@ -140,6 +142,12 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 			? (customSystemPrompt || null) // empty string becomes null
 			: (existing?.customSystemPrompt || null);
 
+		// Clamp the agent-round cap to a safe range.
+		let rounds = existing?.maxAgentRounds ?? 20;
+		if (typeof maxAgentRounds === 'number' && Number.isFinite(maxAgentRounds)) {
+			rounds = Math.max(1, Math.min(200, Math.floor(maxAgentRounds)));
+		}
+
 		if (existing) {
 			await db
 				.update(userAiConfig)
@@ -147,6 +155,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 					provider: activeProvider,
 					providersConfig: JSON.stringify(existingProvidersConfig),
 					customSystemPrompt: systemPrompt,
+					maxAgentRounds: rounds,
 					updatedAt: new Date()
 				})
 				.where(eq(userAiConfig.id, existing.id));
@@ -157,6 +166,7 @@ export const PUT: RequestHandler = async ({ locals, request }) => {
 				provider: activeProvider,
 				providersConfig: JSON.stringify(existingProvidersConfig),
 				customSystemPrompt: systemPrompt,
+				maxAgentRounds: rounds,
 				createdAt: new Date(),
 				updatedAt: new Date()
 			});

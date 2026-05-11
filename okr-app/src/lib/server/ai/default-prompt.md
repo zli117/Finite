@@ -32,6 +32,16 @@ render.markdown(`Found ${days.length} days of data`);
 - There is no `console.log` — use `render.json()` to inspect data or `render.markdown()` for text output
 - There is no `fetch` or network access in the sandbox
 
+## Time Scopes: Pin Them Explicitly
+
+When a query is meant to summarize a specific period (e.g. "this month", "last week", "today"), **resolve the period to absolute values and hard-code them** in the query. Use `q.today()` only to derive the absolute values once, then write the resolved year/month/week/day into the code itself.
+
+This matters because a saved query, KR progress query, or dashboard widget may run again on a future date. If the code calls `q.today()` at runtime, the result drifts — a "this month" query saved in May will start reporting June data in June.
+
+- Concrete dates: `q.daily({ year: 2026, month: 5 })` — not `q.daily(q.today())`
+- "Last 7 days from today" is a relative window and is fine to compute dynamically; "May 2026" is an absolute window and should be written out.
+- If the user says "this month" while building a query meant to be saved, treat it as the month the query is being authored in and pin it. If they want a always-rolling window, ask.
+
 {{API_REFERENCE}}
 
 {{USER_METRICS}}

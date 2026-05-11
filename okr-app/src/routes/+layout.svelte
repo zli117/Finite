@@ -1,6 +1,7 @@
 <script lang="ts">
 	import '../app.css';
 	import Nav from '$lib/components/Nav.svelte';
+	import AssistantSidebar from '$lib/components/AssistantSidebar.svelte';
 	import { invalidate } from '$app/navigation';
 	import { browser } from '$app/environment';
 
@@ -61,6 +62,15 @@
 {/if}
 
 {@render children()}
+
+{#if data.user}
+	<AssistantSidebar
+		hasAiConfig={data.aiConfig.hasAiConfig}
+		configuredProviders={data.aiConfig.configuredProviders}
+		activeProvider={data.aiConfig.activeProvider}
+		providerModels={data.aiConfig.providerModels}
+	/>
+{/if}
 
 <style>
 	.app-bg-decor {

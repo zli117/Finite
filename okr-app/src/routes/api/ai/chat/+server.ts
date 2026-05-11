@@ -3,8 +3,25 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/db/client';
 import { userAiConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
-import { sendMessage, PROVIDER_DEFAULTS, type AiMessage, type AiProvider } from '$lib/server/ai/providers';
+import {
+	sendMessage,
+	PROVIDER_DEFAULTS,
+	type AiMessage,
+	type AiProvider
+} from '$lib/server/ai/providers';
 import { buildSystemPrompt, type AiChatContext } from '$lib/server/ai/system-prompt';
+import {
+	TOOLS,
+	parseToolCalls,
+	stripToolCalls,
+	executeTool,
+	getUserToolContext,
+	type ToolCall,
+	type ToolCallResult
+} from '$lib/server/ai/tools';
+
+const DEFAULT_MAX_AGENT_ROUNDS = 20;
+const ABSOLUTE_MAX_AGENT_ROUNDS = 200; // hard ceiling regardless of user setting
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) {
@@ -13,7 +30,13 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 
 	try {
 		const body = await request.json();
-		const { messages, provider: overrideProvider, model: overrideModel, context, contextData } = body as {
+		const {
+			messages,
+			provider: overrideProvider,
+			model: overrideModel,
+			context,
+			contextData
+		} = body as {
 			messages: AiMessage[];
 			provider?: AiProvider;
 			model?: string;
@@ -25,7 +48,6 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			return json({ error: 'Messages are required' }, { status: 400 });
 		}
 
-		// Get user's AI config
 		const config = await db.query.userAiConfig.findFirst({
 			where: eq(userAiConfig.userId, locals.user.id)
 		});
@@ -38,23 +60,24 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		}
 
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const providersConfig: Record<string, Record<string, any>> =
-			config.providersConfig ? JSON.parse(config.providersConfig) : {};
+		const providersConfig: Record<string, Record<string, any>> = config.providersConfig
+			? JSON.parse(config.providersConfig)
+			: {};
 
-		// Use override provider if specified, otherwise use the default active provider
 		const provider = overrideProvider || config.provider;
 		const providerConfig = providersConfig[provider] || {};
 
-		// Validate API key exists (except Ollama which may not need one)
 		if (provider !== 'ollama' && !providerConfig.apiKey) {
-			return json({ error: `API key not configured for ${PROVIDER_DEFAULTS[provider]?.label || provider}` }, { status: 400 });
+			return json(
+				{ error: `API key not configured for ${PROVIDER_DEFAULTS[provider]?.label || provider}` },
+				{ status: 400 }
+			);
 		}
 
-		// Resolve model: explicit override > first in models array > old model field > provider default
-		const models: string[] = providerConfig.models || (providerConfig.model ? [providerConfig.model] : []);
+		const models: string[] =
+			providerConfig.models || (providerConfig.model ? [providerConfig.model] : []);
 		const resolvedModel = overrideModel || models[0] || PROVIDER_DEFAULTS[provider]?.model;
 
-		// Apply defaults
 		const defaults = PROVIDER_DEFAULTS[provider];
 		const finalConfig = {
 			...defaults,
@@ -62,19 +85,167 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			model: resolvedModel
 		};
 
-		// Build system prompt
 		const systemPrompt = await buildSystemPrompt(locals.user.id, context, contextData);
 
-		// Send to provider
-		const response = await sendMessage(provider, finalConfig, systemPrompt, messages);
+		// In assistant (tool-use) context, run the agent loop:
+		// auto-execute read tools, return write tools as pending proposals.
+		if (context === 'assistant') {
+			const ctx = await getUserToolContext(locals.user.id);
+			// User-configurable cap on agent loop rounds, clamped to a safety ceiling.
+			const userMaxRounds = Number.isFinite(config.maxAgentRounds)
+				? Number(config.maxAgentRounds)
+				: DEFAULT_MAX_AGENT_ROUNDS;
+			const maxRounds = Math.max(1, Math.min(ABSOLUTE_MAX_AGENT_ROUNDS, userMaxRounds));
 
+			// Append-only: workingMessages = incoming history + every message added
+			// this turn. We slice this to return only what was added, and the client
+			// re-sends the full conversation verbatim on the next turn so the LLM
+			// sees the same byte-identical prefix (good for prompt caching).
+			const initialLength = messages.length;
+			const workingMessages: AiMessage[] = [...messages];
+
+			type TranscriptStep =
+				| { type: 'text'; content: string }
+				| {
+						type: 'tool_call';
+						id: string;
+						name: string;
+						args: Record<string, unknown>;
+						ok: boolean;
+						result?: unknown;
+						error?: string;
+					};
+			const steps: TranscriptStep[] = [];
+			let pendingWrite: ToolCall | null = null;
+			let exhausted = true;
+
+			const TOOL_CALL_CLOSE = '</tool_call>';
+			const stopOptions = { stopSequences: [TOOL_CALL_CLOSE] };
+
+			for (let round = 0; round < maxRounds; round++) {
+				const response = await sendMessage(
+					provider,
+					finalConfig,
+					systemPrompt,
+					workingMessages,
+					stopOptions
+				);
+				if (response.error) return json({ error: response.error }, { status: 502 });
+
+				let assistantContent = response.content;
+				if (response.stoppedOnSequence && assistantContent.includes('<tool_call')) {
+					assistantContent = assistantContent + TOOL_CALL_CLOSE;
+				}
+
+				const roundText = stripToolCalls(assistantContent).trim();
+				if (roundText) steps.push({ type: 'text', content: roundText });
+
+				const firstCall = parseToolCalls(assistantContent)[0];
+
+				// In every termination branch we still record the assistant's last
+				// turn so the wire-history we return to the client is complete.
+				if (!firstCall) {
+					workingMessages.push({ role: 'assistant', content: assistantContent });
+					exhausted = false;
+					break;
+				}
+
+				const tool = TOOLS[firstCall.name];
+
+				if (!tool) {
+					steps.push({
+						type: 'tool_call',
+						id: firstCall.id,
+						name: firstCall.name,
+						args: firstCall.args,
+						ok: false,
+						error: 'Unknown tool'
+					});
+					workingMessages.push({ role: 'assistant', content: assistantContent });
+					workingMessages.push({
+						role: 'user',
+						content: `<tool_result name="${firstCall.name}">\nERROR: Unknown tool. Available tools are listed in the system prompt.\n</tool_result>`
+					});
+					continue;
+				}
+
+				if (tool.category === 'write') {
+					// Record the assistant turn that contains the proposal. We do NOT
+					// append a tool_result here — that gets added by the client when
+					// the user clicks Apply or Discard, preserving append-only.
+					workingMessages.push({ role: 'assistant', content: assistantContent });
+					pendingWrite = firstCall;
+					exhausted = false;
+					break;
+				}
+
+				// Read → execute, record in transcript, feed back to model.
+				const result = await executeTool(ctx, firstCall);
+				steps.push({
+					type: 'tool_call',
+					id: firstCall.id,
+					name: firstCall.name,
+					args: firstCall.args,
+					ok: result.ok,
+					result: result.result,
+					error: result.error
+				});
+				workingMessages.push({ role: 'assistant', content: assistantContent });
+				workingMessages.push({ role: 'user', content: formatToolResults([result]) });
+			}
+
+			if (exhausted) {
+				steps.push({
+					type: 'text',
+					content: `_I hit my tool-call budget (${maxRounds} steps) before finishing. Reply "continue" if you want me to keep going._`
+				});
+			}
+
+			const added: AiMessage[] = workingMessages.slice(initialLength);
+
+			return json({
+				steps,
+				added,
+				toolCalls: pendingWrite
+					? [
+							{
+								id: pendingWrite.id,
+								name: pendingWrite.name,
+								args: pendingWrite.args,
+								preview: previewFor(pendingWrite),
+								category: 'write' as const
+							}
+						]
+					: []
+			});
+		}
+
+		// Non-assistant contexts: existing single-shot behavior.
+		const response = await sendMessage(provider, finalConfig, systemPrompt, messages);
 		if (response.error) {
 			return json({ error: response.error }, { status: 502 });
 		}
-
 		return json({ content: response.content });
 	} catch (error) {
 		console.error('AI chat error:', error);
 		return json({ error: 'Failed to get AI response' }, { status: 500 });
 	}
 };
+
+function formatToolResults(results: ToolCallResult[]): string {
+	const blocks = results.map((r) => {
+		const payload = r.ok ? JSON.stringify(r.result) : `ERROR: ${r.error}`;
+		return `<tool_result name="${r.name}">\n${payload}\n</tool_result>`;
+	});
+	return blocks.join('\n');
+}
+
+function previewFor(c: ToolCall): string {
+	const tool = TOOLS[c.name];
+	if (!tool) return `${c.name}(${JSON.stringify(c.args)})`;
+	try {
+		return tool.preview(c.args);
+	} catch {
+		return tool.name;
+	}
+}

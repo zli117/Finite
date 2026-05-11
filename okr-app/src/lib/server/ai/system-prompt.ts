@@ -8,13 +8,16 @@ import { userAiConfig, metricsTemplates } from '$lib/db/schema';
 import type { MetricDefinition } from '$lib/db/schema';
 import { eq, desc } from 'drizzle-orm';
 import defaultPromptMd from './default-prompt.md?raw';
+import assistantPromptMd from './assistant-prompt.md?raw';
 import apiReferenceMd from '../../../../docs/QUERY_API_REFERENCE.md?raw';
 import { getPlugin } from '$lib/server/plugins/manager';
+import { describeToolsForPrompt, buildStateSnapshot, type PageContext } from './tools';
 
-export type AiChatContext = 'query' | 'kr_progress' | 'widget' | 'metric';
+export type AiChatContext = 'query' | 'kr_progress' | 'widget' | 'metric' | 'assistant';
 
 export const CONTEXT_ADDENDA: Record<AiChatContext, string> = {
 	query: '',
+	assistant: '',
 	kr_progress: `
 ## Context: Key Result Progress Code
 
@@ -77,7 +80,10 @@ export async function buildSystemPrompt(userId: string, context: AiChatContext =
 		where: eq(userAiConfig.userId, userId)
 	});
 
-	const basePrompt = config?.customSystemPrompt || defaultPromptMd;
+	// Assistant mode uses a separate template (tool-use), not the query coding prompt.
+	// The user's custom prompt only overrides the query-coding default.
+	const basePrompt =
+		context === 'assistant' ? assistantPromptMd : (config?.customSystemPrompt || defaultPromptMd);
 
 	// Build metrics info from user's active template
 	const metricsInfo = await buildMetricsInfo(userId);
@@ -86,6 +92,13 @@ export async function buildSystemPrompt(userId: string, context: AiChatContext =
 	let prompt = basePrompt;
 	prompt = prompt.replace('{{API_REFERENCE}}', `## API Reference\n\n${apiReferenceMd}`);
 	prompt = prompt.replace('{{USER_METRICS}}', metricsInfo);
+
+	if (context === 'assistant') {
+		const page = (contextData?.page as PageContext | undefined) ?? {};
+		const stateSnapshot = await buildStateSnapshot(userId, page);
+		prompt = prompt.replace('{{TOOLS}}', describeToolsForPrompt());
+		prompt = prompt.replace('{{STATE}}', stateSnapshot);
+	}
 
 	// Append context-specific instructions
 	const addendum = CONTEXT_ADDENDA[context];

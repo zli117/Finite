@@ -214,6 +214,7 @@ export const userAiConfig = sqliteTable('user_ai_config', {
 	}).notNull().default('anthropic'),
 	providersConfig: text('providers_config'), // JSON: { anthropic: { apiKey, model? }, openai: { apiKey, model? }, ... }
 	customSystemPrompt: text('custom_system_prompt'), // null = use default
+	maxAgentRounds: integer('max_agent_rounds').notNull().default(20),
 	createdAt: integer('created_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date()),
 	updatedAt: integer('updated_at', { mode: 'timestamp' }).notNull().$defaultFn(() => new Date())
 });

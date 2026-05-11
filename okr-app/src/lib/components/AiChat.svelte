@@ -1,10 +1,45 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/sanitize';
 	import { tick } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
+
+	interface ToolCallProposal {
+		id: string;
+		name: string;
+		args: Record<string, unknown>;
+		preview: string;
+		category: 'write';
+	}
+
+	type TranscriptStep =
+		| { type: 'text'; content: string }
+		| {
+				type: 'tool_call';
+				id: string;
+				name: string;
+				args: Record<string, unknown>;
+				ok: boolean;
+				result?: unknown;
+				error?: string;
+			};
+
+	interface WireMessage {
+		role: 'user' | 'assistant';
+		content: string;
+	}
 
 	interface AiMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		// Append-only slice of wire messages this UI turn contributed. Flattened
+		// across all messages = the exact conversation history sent to the LLM.
+		// Apply/Discard pushes one extra <tool_result> entry here so the result
+		// of an applied write is visible to the model on the next turn.
+		wireMessages: WireMessage[];
+		steps?: TranscriptStep[];
+		toolCalls?: ToolCallProposal[];
+		toolStatus?: Record<string, 'pending' | 'applied' | 'discarded' | 'failed'>;
+		toolError?: Record<string, string>;
 	}
 
 	interface ParsedBlock {
@@ -22,17 +57,47 @@
 		context = 'query',
 		contextData = {}
 	}: {
-		onCopyToEditor: (code: string) => void;
+		onCopyToEditor?: (code: string) => void;
 		hasConfig: boolean;
 		configuredProviders: string[];
 		activeProvider: string;
 		providerModels?: Record<string, string[]>;
 		pendingCode?: string;
-		context?: 'query' | 'kr_progress' | 'widget' | 'metric';
+		context?: 'query' | 'kr_progress' | 'widget' | 'metric' | 'assistant';
 		contextData?: Record<string, unknown>;
 	} = $props();
 
 	let messages = $state<AiMessage[]>([]);
+	let expandedSteps = $state<Record<string, boolean>>({});
+
+	function toggleStep(key: string) {
+		expandedSteps[key] = !expandedSteps[key];
+	}
+
+	function prettyJson(value: unknown): string {
+		try {
+			return JSON.stringify(value, null, 2);
+		} catch {
+			return String(value);
+		}
+	}
+
+	function summarizeArgs(args: Record<string, unknown>): string {
+		const keys = Object.keys(args);
+		if (keys.length === 0) return '';
+		const parts: string[] = [];
+		for (const k of keys.slice(0, 3)) {
+			const v = args[k];
+			let s: string;
+			if (typeof v === 'string') s = v.length > 40 ? v.slice(0, 40) + '…' : v;
+			else if (v === null || v === undefined) s = String(v);
+			else if (typeof v === 'object') s = '{…}';
+			else s = String(v);
+			parts.push(`${k}: ${s}`);
+		}
+		if (keys.length > 3) parts.push(`+${keys.length - 3}`);
+		return parts.join(' · ');
+	}
 	let inputText = $state('');
 	let loading = $state(false);
 	let error = $state('');
@@ -74,11 +139,19 @@
 		ollama: 'Ollama'
 	};
 
-	const suggestions = [
+	const querySuggestions = [
 		'Show my sleep trends this month',
 		'Task completion rate by tag',
 		'Weekly productivity report'
 	];
+
+	const assistantSuggestions = [
+		'What\'s on my plate today?',
+		'Add a 1h task tomorrow: review weekly plan',
+		'List my objectives for this year'
+	];
+
+	const suggestions = $derived(context === 'assistant' ? assistantSuggestions : querySuggestions);
 
 	function parseResponse(content: string): ParsedBlock[] {
 		const blocks: ParsedBlock[] = [];
@@ -128,30 +201,30 @@
 		}
 	}
 
-	async function sendMessage(text?: string) {
-		const messageText = text || inputText.trim();
-		if (!messageText || loading) return;
+	let abortController = $state<AbortController | null>(null);
 
-		inputText = '';
-		error = '';
-
-		// Add user message
-		messages = [...messages, { role: 'user', content: messageText }];
-		await scrollToBottom();
-
+	async function runAgentRound() {
+		// Sends the current wire history to the server and appends the assistant's
+		// response. Used both for initial user messages and auto-continuation
+		// after Apply.
+		if (loading) return;
 		loading = true;
-
+		const controller = new AbortController();
+		abortController = controller;
 		try {
+			const wireHistory: WireMessage[] = messages.flatMap((m) => m.wireMessages);
+
 			const response = await fetch('/api/ai/chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					messages,
+					messages: wireHistory,
 					provider: selectedProvider !== activeProvider ? selectedProvider : undefined,
 					model: selectedModel || undefined,
 					context,
 					contextData: Object.keys(contextData).length > 0 ? contextData : undefined
-				})
+				}),
+				signal: controller.signal
 			});
 
 			const result = await response.json();
@@ -160,12 +233,158 @@
 				throw new Error(result.error || 'Failed to get response');
 			}
 
-			messages = [...messages, { role: 'assistant', content: result.content }];
+			const added: WireMessage[] = Array.isArray(result.added) ? result.added : [];
+			const finalText: string =
+				typeof result.content === 'string'
+					? result.content
+					: deriveFinalText(result.steps);
+
+			const assistantMsg: AiMessage = {
+				role: 'assistant',
+				content: finalText,
+				wireMessages: added
+			};
+			if (Array.isArray(result.steps) && result.steps.length > 0) {
+				assistantMsg.steps = result.steps;
+			}
+			if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
+				assistantMsg.toolCalls = result.toolCalls;
+				assistantMsg.toolStatus = Object.fromEntries(
+					result.toolCalls.map((c: ToolCallProposal) => [c.id, 'pending'])
+				);
+				assistantMsg.toolError = {};
+			}
+			messages = [...messages, assistantMsg];
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to get AI response';
+			if (err instanceof DOMException && err.name === 'AbortError') {
+				// User cancelled mid-flight — silent.
+			} else {
+				error = err instanceof Error ? err.message : 'Failed to get AI response';
+			}
 		} finally {
 			loading = false;
+			abortController = null;
 			await scrollToBottom();
+		}
+	}
+
+	function stopAgent() {
+		abortController?.abort();
+	}
+
+	async function sendMessage(text?: string) {
+		const messageText = text || inputText.trim();
+		if (!messageText || loading) return;
+
+		inputText = '';
+		error = '';
+
+		const userMsg: AiMessage = {
+			role: 'user',
+			content: messageText,
+			wireMessages: [{ role: 'user', content: messageText }]
+		};
+		messages = [...messages, userMsg];
+		await scrollToBottom();
+
+		await runAgentRound();
+	}
+
+	function deriveFinalText(steps: unknown): string {
+		if (!Array.isArray(steps)) return '';
+		return steps
+			.filter((s): s is TranscriptStep => !!s && (s as TranscriptStep).type === 'text')
+			.map((s) => (s as { type: 'text'; content: string }).content)
+			.join('\n\n');
+	}
+
+	function appendToolResultWire(msg: AiMessage, name: string, payload: string) {
+		msg.wireMessages = [
+			...msg.wireMessages,
+			{ role: 'user', content: `<tool_result name="${name}">\n${payload}\n</tool_result>` }
+		];
+	}
+
+	function appendStepFromApply(
+		msg: AiMessage,
+		call: ToolCallProposal,
+		ok: boolean,
+		result?: unknown,
+		errorMsg?: string
+	) {
+		const step: TranscriptStep = {
+			type: 'tool_call',
+			id: call.id,
+			name: call.name,
+			args: call.args,
+			ok,
+			result,
+			error: errorMsg
+		};
+		msg.steps = [...(msg.steps ?? []), step];
+	}
+
+	async function applyToolCall(msgIndex: number, call: ToolCallProposal) {
+		const msg = messages[msgIndex];
+		if (!msg.toolStatus || msg.toolStatus[call.id] !== 'pending') return;
+		msg.toolStatus[call.id] = 'applied';
+		messages = [...messages];
+		try {
+			const response = await fetch('/api/ai/tool', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: call.id, name: call.name, args: call.args })
+			});
+			const result = await response.json();
+			if (!response.ok || !result.ok) {
+				msg.toolStatus![call.id] = 'failed';
+				msg.toolError![call.id] = result.error || 'Failed to apply';
+				// Feed the failure back into the wire history so the agent can react
+				// to it on the next turn.
+				appendToolResultWire(msg, call.name, `ERROR: ${result.error || 'Failed to apply'}`);
+				appendStepFromApply(msg, call, false, undefined, result.error || 'Failed to apply');
+				messages = [...messages];
+			} else {
+				// Feed the successful result back so the agent can continue a multi-step
+				// workflow (e.g. "now add 3 KRs to that objective" can use the new id).
+				appendToolResultWire(msg, call.name, JSON.stringify(result.result));
+				appendStepFromApply(msg, call, true, result.result);
+				messages = [...messages];
+				// Refresh the current page so the edit is reflected immediately.
+				invalidateAll();
+				// Auto-continue the agent loop: the model now sees the tool_result and
+				// can chain follow-up calls. Stops naturally when the model emits a
+				// text-only response (no <tool_call>).
+				await runAgentRound();
+			}
+		} catch (err) {
+			const errorMsg = err instanceof Error ? err.message : 'Failed to apply';
+			msg.toolStatus![call.id] = 'failed';
+			msg.toolError![call.id] = errorMsg;
+			appendToolResultWire(msg, call.name, `ERROR: ${errorMsg}`);
+			appendStepFromApply(msg, call, false, undefined, errorMsg);
+			messages = [...messages];
+		}
+	}
+
+	function discardToolCall(msgIndex: number, call: ToolCallProposal) {
+		const msg = messages[msgIndex];
+		if (!msg.toolStatus || msg.toolStatus[call.id] !== 'pending') return;
+		msg.toolStatus[call.id] = 'discarded';
+		// Append a tool_result so the model knows the proposal was declined on
+		// the next turn — otherwise it sees its own dangling <tool_call> and may
+		// re-propose the same write.
+		appendToolResultWire(msg, call.name, 'DISCARDED by user — they chose not to apply this write.');
+		messages = [...messages];
+	}
+
+	async function applyAllPending(msgIndex: number) {
+		const msg = messages[msgIndex];
+		if (!msg.toolCalls || !msg.toolStatus) return;
+		for (const c of msg.toolCalls) {
+			if (msg.toolStatus[c.id] === 'pending') {
+				await applyToolCall(msgIndex, c);
+			}
 		}
 	}
 
@@ -254,37 +473,121 @@
 				</div>
 			</div>
 		{:else}
-			{#each messages as message}
+			{#each messages as message, msgIndex}
 				<div class="message message-{message.role}">
 					<div class="message-role">{message.role === 'user' ? 'You' : 'AI'}</div>
 					{#if message.role === 'user'}
 						<div class="message-content">{message.content}</div>
 					{:else}
-						{#each parseResponse(message.content) as block}
-							{#if block.type === 'text'}
-								<div class="message-text">
-									{@html renderMarkdown(block.content)}
-								</div>
-							{:else}
-								<div class="code-block">
-									<pre><code>{block.content}</code></pre>
-									<div class="code-actions">
-										<button
-											class="btn btn-primary btn-xs"
-											onclick={() => onCopyToEditor(block.content)}
-										>
-											Copy to Editor
+						{#if message.steps && message.steps.length > 0}
+							{#each message.steps as step, stepIdx}
+								{#if step.type === 'text'}
+									{#each parseResponse(step.content) as block}
+										{#if block.type === 'text'}
+											<div class="message-text">{@html renderMarkdown(block.content)}</div>
+										{:else}
+											<div class="code-block">
+												<pre><code>{block.content}</code></pre>
+												<div class="code-actions">
+													{#if onCopyToEditor}
+														<button class="btn btn-primary btn-xs" onclick={() => onCopyToEditor?.(block.content)}>Copy to Editor</button>
+													{/if}
+													<button class="btn btn-secondary btn-xs" onclick={() => copyToClipboard(block.content)}>Copy</button>
+												</div>
+											</div>
+										{/if}
+									{/each}
+								{:else}
+									{@const stepKey = `${msgIndex}-${stepIdx}`}
+									{@const expanded = expandedSteps[stepKey]}
+									<div class="step-call" class:step-call-err={!step.ok}>
+										<button class="step-summary" onclick={() => toggleStep(stepKey)} aria-expanded={expanded}>
+											<span class="step-chevron" class:step-chevron-open={expanded}>▸</span>
+											<span class="step-icon">{step.ok ? '✓' : '✗'}</span>
+											<span class="step-name">{step.name}</span>
+											<span class="step-preview">{summarizeArgs(step.args)}</span>
 										</button>
-										<button
-											class="btn btn-secondary btn-xs"
-											onclick={() => copyToClipboard(block.content)}
-										>
-											Copy
-										</button>
+										{#if expanded}
+											<div class="step-body">
+												<div class="step-section">
+													<div class="step-section-label">Arguments</div>
+													<pre class="step-json">{prettyJson(step.args)}</pre>
+												</div>
+												<div class="step-section">
+													<div class="step-section-label">{step.ok ? 'Result' : 'Error'}</div>
+													<pre class="step-json">{step.ok ? prettyJson(step.result) : step.error ?? 'unknown error'}</pre>
+												</div>
+											</div>
+										{/if}
 									</div>
-								</div>
-							{/if}
-						{/each}
+								{/if}
+							{/each}
+						{:else}
+							{#each parseResponse(message.content) as block}
+								{#if block.type === 'text'}
+									<div class="message-text">{@html renderMarkdown(block.content)}</div>
+								{:else}
+									<div class="code-block">
+										<pre><code>{block.content}</code></pre>
+										<div class="code-actions">
+											{#if onCopyToEditor}
+												<button class="btn btn-primary btn-xs" onclick={() => onCopyToEditor?.(block.content)}>Copy to Editor</button>
+											{/if}
+											<button class="btn btn-secondary btn-xs" onclick={() => copyToClipboard(block.content)}>Copy</button>
+										</div>
+									</div>
+								{/if}
+							{/each}
+						{/if}
+						{#if message.toolCalls && message.toolCalls.length > 0}
+							{@const pendingCount = message.toolCalls.filter(
+								(c) => message.toolStatus?.[c.id] === 'pending'
+							).length}
+							<div class="tool-calls">
+								{#each message.toolCalls as call}
+									{@const status = message.toolStatus?.[call.id] ?? 'pending'}
+									<div class="tool-card tool-card-{status}">
+										<div class="tool-card-body">
+											<div class="tool-name">{call.name}</div>
+											<div class="tool-preview">{call.preview}</div>
+											{#if status === 'failed' && message.toolError?.[call.id]}
+												<div class="tool-error">{message.toolError[call.id]}</div>
+											{/if}
+										</div>
+										<div class="tool-actions">
+											{#if status === 'pending'}
+												<button
+													class="btn btn-primary btn-xs"
+													onclick={() => applyToolCall(msgIndex, call)}
+												>
+													Apply
+												</button>
+												<button
+													class="btn btn-secondary btn-xs"
+													onclick={() => discardToolCall(msgIndex, call)}
+												>
+													Discard
+												</button>
+											{:else if status === 'applied'}
+												<span class="tool-status tool-status-applied">Applied</span>
+											{:else if status === 'discarded'}
+												<span class="tool-status">Discarded</span>
+											{:else if status === 'failed'}
+												<span class="tool-status tool-status-failed">Failed</span>
+											{/if}
+										</div>
+									</div>
+								{/each}
+								{#if pendingCount > 1}
+									<button
+										class="btn btn-primary btn-xs apply-all"
+										onclick={() => applyAllPending(msgIndex)}
+									>
+										Apply all {pendingCount}
+									</button>
+								{/if}
+							</div>
+						{/if}
 					{/if}
 				</div>
 			{/each}
@@ -313,19 +616,30 @@
 			disabled={loading || !hasConfig}
 			rows="2"
 		></textarea>
-		<button
-			class="btn btn-primary send-btn"
-			onclick={() => sendMessage()}
-			disabled={loading || !inputText.trim() || !hasConfig}
-		>
-			{#if loading}
-				...
-			{:else}
+		{#if loading}
+			<button
+				class="btn btn-secondary send-btn"
+				onclick={stopAgent}
+				title="Stop the agent"
+				aria-label="Stop"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="6" y="6" width="12" height="12" rx="1"/>
+				</svg>
+			</button>
+		{:else}
+			<button
+				class="btn btn-primary send-btn"
+				onclick={() => sendMessage()}
+				disabled={!inputText.trim() || !hasConfig}
+				aria-label="Send"
+				title="Send"
+			>
 				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
 				</svg>
-			{/if}
-		</button>
+			</button>
+		{/if}
 	</div>
 </div>
 
@@ -617,5 +931,191 @@
 		align-items: center;
 		justify-content: center;
 		border-radius: var(--radius-md);
+	}
+
+	/* Tool call cards (assistant context) */
+	/* Inline tool-call step (collapsible, shown alongside text in the transcript) */
+	.step-call {
+		margin: 4px 0;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		background: var(--color-bg);
+		overflow: hidden;
+	}
+
+	.step-call-err {
+		border-color: #fecaca;
+		background: #fef2f2;
+	}
+
+	.step-summary {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		padding: 4px 8px;
+		border: none;
+		background: transparent;
+		font-size: 0.75rem;
+		font-family: inherit;
+		text-align: left;
+		cursor: pointer;
+		color: var(--color-text);
+	}
+
+	.step-summary:hover {
+		background: rgb(0 0 0 / 0.03);
+	}
+
+	.step-chevron {
+		display: inline-block;
+		transition: transform 0.15s;
+		font-size: 0.625rem;
+		color: var(--color-text-muted);
+	}
+
+	.step-chevron-open {
+		transform: rotate(90deg);
+	}
+
+	.step-icon {
+		font-weight: 600;
+		color: #15803d;
+	}
+
+	.step-call-err .step-icon {
+		color: var(--color-error);
+	}
+
+	.step-name {
+		font-family: monospace;
+		font-weight: 600;
+	}
+
+	.step-preview {
+		color: var(--color-text-muted);
+		font-size: 0.6875rem;
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.step-body {
+		padding: 6px 10px 10px;
+		border-top: 1px solid var(--color-border);
+		background: var(--color-surface, white);
+	}
+
+	.step-section {
+		margin-top: 6px;
+	}
+
+	.step-section:first-child {
+		margin-top: 2px;
+	}
+
+	.step-section-label {
+		font-size: 0.625rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--color-text-muted);
+		margin-bottom: 2px;
+	}
+
+	.step-json {
+		margin: 0;
+		padding: 6px 8px;
+		background: var(--color-bg);
+		border-radius: var(--radius-sm);
+		font-size: 0.6875rem;
+		line-height: 1.4;
+		max-height: 220px;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.tool-calls {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-xs);
+		margin-top: var(--spacing-xs);
+	}
+
+	.tool-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--spacing-sm);
+		padding: var(--spacing-sm) var(--spacing-md);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-surface, white);
+	}
+
+	.tool-card-applied {
+		border-color: #bbf7d0;
+		background: #f0fdf4;
+	}
+
+	.tool-card-discarded {
+		opacity: 0.55;
+	}
+
+	.tool-card-failed {
+		border-color: #fecaca;
+		background: #fef2f2;
+	}
+
+	.tool-card-body {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.tool-name {
+		font-size: 0.6875rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--color-text-muted);
+		font-weight: 600;
+	}
+
+	.tool-preview {
+		font-size: 0.8125rem;
+		line-height: 1.4;
+		color: var(--color-text);
+		word-break: break-word;
+	}
+
+	.tool-error {
+		font-size: 0.75rem;
+		color: var(--color-error);
+		margin-top: 2px;
+	}
+
+	.tool-actions {
+		display: flex;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.tool-status {
+		font-size: 0.6875rem;
+		color: var(--color-text-muted);
+		padding: 2px 8px;
+	}
+
+	.tool-status-applied {
+		color: #15803d;
+	}
+
+	.tool-status-failed {
+		color: var(--color-error);
+	}
+
+	.apply-all {
+		align-self: flex-end;
 	}
 </style>

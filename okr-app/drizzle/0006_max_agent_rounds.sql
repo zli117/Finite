@@ -1,0 +1,1 @@
+ALTER TABLE `user_ai_config` ADD `max_agent_rounds` integer DEFAULT 20 NOT NULL;

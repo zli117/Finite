@@ -17,6 +17,17 @@ export interface AiProviderConfig {
 export interface AiResponse {
 	content: string;
 	error?: string;
+	/** True when the model was halted by a stop sequence (so the sequence is NOT in `content`). */
+	stoppedOnSequence?: boolean;
+}
+
+export interface AiSendOptions {
+	/**
+	 * Stop sequences. The model halts generation when one is emitted; the matched
+	 * text is NOT included in the returned content. Used for tool-use one-at-a-time
+	 * pacing.
+	 */
+	stopSequences?: string[];
 }
 
 export type AiProvider = 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ollama';
@@ -61,27 +72,75 @@ async function fetchWithTimeout(url: string, options: RequestInit): Promise<Resp
 	}
 }
 
+/**
+ * POST to Anthropic with automatic retry on 429 (rate limit) and 529 (overload).
+ * Honors the `retry-after` header when present; otherwise uses exponential backoff
+ * capped at the timeout budget.
+ */
+async function anthropicFetchWithRetry(body: unknown, apiKey: string): Promise<Response> {
+	const maxAttempts = 4;
+	let attempt = 0;
+	let lastResponse: Response | null = null;
+	while (attempt < maxAttempts) {
+		const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': apiKey,
+				'anthropic-version': '2023-06-01'
+			},
+			body: JSON.stringify(body)
+		});
+		if (response.status !== 429 && response.status !== 529) return response;
+		lastResponse = response;
+		attempt += 1;
+		if (attempt >= maxAttempts) break;
+		const retryAfter = response.headers.get('retry-after');
+		const headerWait = retryAfter ? parseInt(retryAfter, 10) * 1000 : NaN;
+		// Exponential backoff: 1s, 2s, 4s. Header `retry-after` wins if present.
+		const backoffMs = Number.isFinite(headerWait) ? headerWait : 1000 * Math.pow(2, attempt - 1);
+		await new Promise((r) => setTimeout(r, Math.min(backoffMs, 8000)));
+	}
+	return lastResponse!;
+}
+
 async function sendAnthropicMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.anthropic.model!;
 
-	const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			'x-api-key': config.apiKey!,
-			'anthropic-version': '2023-06-01'
-		},
-		body: JSON.stringify({
-			model,
-			max_tokens: 4096,
-			system: systemPrompt,
-			messages: messages.map((m) => ({ role: m.role, content: m.content }))
+	// Prompt caching: mark the (large, stable) system prompt as cacheable, and
+	// mark the last message as a second breakpoint so the growing conversation
+	// prefix is also cached across agent-loop rounds. Anthropic allows up to 4
+	// cache_control breakpoints; we use 2.
+	const systemBlocks = [
+		{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
+	];
+
+	type ContentBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
+	const wireMessages: { role: 'user' | 'assistant'; content: ContentBlock[] }[] = messages.map(
+		(m) => ({
+			role: m.role,
+			content: [{ type: 'text', text: m.content }]
 		})
-	});
+	);
+	if (wireMessages.length > 0) {
+		const last = wireMessages[wireMessages.length - 1];
+		last.content[last.content.length - 1].cache_control = { type: 'ephemeral' };
+	}
+
+	const body: Record<string, unknown> = {
+		model,
+		max_tokens: 4096,
+		system: systemBlocks,
+		messages: wireMessages
+	};
+	if (options?.stopSequences?.length) body.stop_sequences = options.stopSequences;
+
+	const response = await anthropicFetchWithRetry(body, config.apiKey!);
 
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({}));
@@ -90,18 +149,32 @@ async function sendAnthropicMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `Anthropic error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { content?: { type: string; text: string }[] }).content?.[0]?.text || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		content?: { type: string; text: string }[];
+		stop_reason?: string;
+	};
+	const text = data.content?.[0]?.text || '';
+	return { content: text, stoppedOnSequence: data.stop_reason === 'stop_sequence' };
 }
 
 async function sendOpenAiMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
 	messages: AiMessage[],
-	baseUrl = 'https://api.openai.com'
+	baseUrl = 'https://api.openai.com',
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.openai.model!;
+
+	const body: Record<string, unknown> = {
+		model,
+		max_tokens: 4096,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) body.stop = options.stopSequences;
 
 	const response = await fetchWithTimeout(`${baseUrl}/v1/chat/completions`, {
 		method: 'POST',
@@ -109,14 +182,7 @@ async function sendOpenAiMessage(
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${config.apiKey}`
 		},
-		body: JSON.stringify({
-			model,
-			max_tokens: 4096,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -126,33 +192,41 @@ async function sendOpenAiMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `API error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		choices?: { message?: { content?: string }; finish_reason?: string }[];
+	};
+	const text = data.choices?.[0]?.message?.content || '';
+	const stoppedOnSequence = data.choices?.[0]?.finish_reason === 'stop';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendGeminiMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.gemini.model!;
 
-	// Convert messages to Gemini format
 	const contents = messages.map((m) => ({
 		role: m.role === 'assistant' ? 'model' : 'user',
 		parts: [{ text: m.content }]
 	}));
+
+	const body: Record<string, unknown> = {
+		systemInstruction: { parts: [{ text: systemPrompt }] },
+		contents
+	};
+	if (options?.stopSequences?.length) {
+		body.generationConfig = { stopSequences: options.stopSequences };
+	}
 
 	const response = await fetchWithTimeout(
 		`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
 		{
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.apiKey },
-			body: JSON.stringify({
-				systemInstruction: { parts: [{ text: systemPrompt }] },
-				contents
-			})
+			body: JSON.stringify(body)
 		}
 	);
 
@@ -163,19 +237,33 @@ async function sendGeminiMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `Gemini error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { candidates?: { content?: { parts?: { text?: string }[] } }[] }).candidates?.[0]?.content?.parts?.[0]?.text || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+	};
+	const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+	const stoppedOnSequence = data.candidates?.[0]?.finishReason === 'STOP';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendOpenRouterMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	if (!config.model) {
 		return { content: '', error: 'Model is required for OpenRouter' };
 	}
+
+	const body: Record<string, unknown> = {
+		model: config.model,
+		max_tokens: 4096,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) body.stop = options.stopSequences;
 
 	const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
 		method: 'POST',
@@ -185,14 +273,7 @@ async function sendOpenRouterMessage(
 			'HTTP-Referer': 'https://getruok.app',
 			'X-Title': 'RUOK'
 		},
-		body: JSON.stringify({
-			model: config.model,
-			max_tokens: 4096,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -202,15 +283,19 @@ async function sendOpenRouterMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `OpenRouter error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		choices?: { message?: { content?: string }; finish_reason?: string }[];
+	};
+	const text = data.choices?.[0]?.message?.content || '';
+	const stoppedOnSequence = data.choices?.[0]?.finish_reason === 'stop';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendOllamaMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	if (!config.model) {
 		return { content: '', error: 'Model is required for Ollama' };
@@ -218,17 +303,22 @@ async function sendOllamaMessage(
 
 	const baseUrl = config.baseUrl || PROVIDER_DEFAULTS.ollama.baseUrl!;
 
+	const body: Record<string, unknown> = {
+		model: config.model,
+		stream: false,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) {
+		body.options = { stop: options.stopSequences };
+	}
+
 	const response = await fetchWithTimeout(`${baseUrl}/api/chat`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			model: config.model,
-			stream: false,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -236,9 +326,9 @@ async function sendOllamaMessage(
 		return { content: '', error: `Ollama error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { message?: { content?: string } }).message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as { message?: { content?: string }; done_reason?: string };
+	const text = data.message?.content || '';
+	return { content: text, stoppedOnSequence: data.done_reason === 'stop' };
 }
 
 /**
@@ -248,20 +338,21 @@ export async function sendMessage(
 	provider: AiProvider,
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	try {
 		switch (provider) {
 			case 'anthropic':
-				return await sendAnthropicMessage(config, systemPrompt, messages);
+				return await sendAnthropicMessage(config, systemPrompt, messages, options);
 			case 'openai':
-				return await sendOpenAiMessage(config, systemPrompt, messages);
+				return await sendOpenAiMessage(config, systemPrompt, messages, undefined, options);
 			case 'gemini':
-				return await sendGeminiMessage(config, systemPrompt, messages);
+				return await sendGeminiMessage(config, systemPrompt, messages, options);
 			case 'openrouter':
-				return await sendOpenRouterMessage(config, systemPrompt, messages);
+				return await sendOpenRouterMessage(config, systemPrompt, messages, options);
 			case 'ollama':
-				return await sendOllamaMessage(config, systemPrompt, messages);
+				return await sendOllamaMessage(config, systemPrompt, messages, options);
 			default:
 				return { content: '', error: `Unknown provider: ${provider}` };
 		}

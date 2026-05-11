@@ -20,7 +20,8 @@ import {
 	type ToolCallResult
 } from '$lib/server/ai/tools';
 
-const MAX_AGENT_ROUNDS = 20;
+const DEFAULT_MAX_AGENT_ROUNDS = 20;
+const ABSOLUTE_MAX_AGENT_ROUNDS = 200; // hard ceiling regardless of user setting
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) {
@@ -90,8 +91,19 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		// auto-execute read tools, return write tools as pending proposals.
 		if (context === 'assistant') {
 			const ctx = await getUserToolContext(locals.user.id);
+			// User-configurable cap on agent loop rounds, clamped to a safety ceiling.
+			const userMaxRounds = Number.isFinite(config.maxAgentRounds)
+				? Number(config.maxAgentRounds)
+				: DEFAULT_MAX_AGENT_ROUNDS;
+			const maxRounds = Math.max(1, Math.min(ABSOLUTE_MAX_AGENT_ROUNDS, userMaxRounds));
+
+			// Append-only: workingMessages = incoming history + every message added
+			// this turn. We slice this to return only what was added, and the client
+			// re-sends the full conversation verbatim on the next turn so the LLM
+			// sees the same byte-identical prefix (good for prompt caching).
+			const initialLength = messages.length;
 			const workingMessages: AiMessage[] = [...messages];
-			// Interleaved transcript: text segments and tool-call records, in order.
+
 			type TranscriptStep =
 				| { type: 'text'; content: string }
 				| {
@@ -104,16 +116,13 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 						error?: string;
 					};
 			const steps: TranscriptStep[] = [];
-			let pendingWrites: ToolCall[] = [];
+			let pendingWrite: ToolCall | null = null;
 			let exhausted = true;
 
-			// Stop the model after each tool call so it can't speculatively emit a
-			// follow-up call before seeing the result. The stop sequence itself is
-			// NOT included in the returned content, so we re-append it before parsing.
 			const TOOL_CALL_CLOSE = '</tool_call>';
 			const stopOptions = { stopSequences: [TOOL_CALL_CLOSE] };
 
-			for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
+			for (let round = 0; round < maxRounds; round++) {
 				const response = await sendMessage(
 					provider,
 					finalConfig,
@@ -128,15 +137,15 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 					assistantContent = assistantContent + TOOL_CALL_CLOSE;
 				}
 
-				// Capture per-round narration so the user sees the running commentary
-				// in order, alongside the tool calls.
 				const roundText = stripToolCalls(assistantContent).trim();
 				if (roundText) steps.push({ type: 'text', content: roundText });
 
-				// Enforce one-tool-call-per-turn: only honor the first call.
 				const firstCall = parseToolCalls(assistantContent)[0];
 
+				// In every termination branch we still record the assistant's last
+				// turn so the wire-history we return to the client is complete.
 				if (!firstCall) {
+					workingMessages.push({ role: 'assistant', content: assistantContent });
 					exhausted = false;
 					break;
 				}
@@ -161,7 +170,11 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 				}
 
 				if (tool.category === 'write') {
-					pendingWrites = [firstCall];
+					// Record the assistant turn that contains the proposal. We do NOT
+					// append a tool_result here — that gets added by the client when
+					// the user clicks Apply or Discard, preserving append-only.
+					workingMessages.push({ role: 'assistant', content: assistantContent });
+					pendingWrite = firstCall;
 					exhausted = false;
 					break;
 				}
@@ -184,19 +197,26 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 			if (exhausted) {
 				steps.push({
 					type: 'text',
-					content: `_I hit my tool-call budget (${MAX_AGENT_ROUNDS} steps) before finishing. Reply "continue" if you want me to keep going._`
+					content: `_I hit my tool-call budget (${maxRounds} steps) before finishing. Reply "continue" if you want me to keep going._`
 				});
 			}
 
+			const added: AiMessage[] = workingMessages.slice(initialLength);
+
 			return json({
 				steps,
-				toolCalls: pendingWrites.map((c) => ({
-					id: c.id,
-					name: c.name,
-					args: c.args,
-					preview: previewFor(c),
-					category: 'write' as const
-				}))
+				added,
+				toolCalls: pendingWrite
+					? [
+							{
+								id: pendingWrite.id,
+								name: pendingWrite.name,
+								args: pendingWrite.args,
+								preview: previewFor(pendingWrite),
+								category: 'write' as const
+							}
+						]
+					: []
 			});
 		}
 

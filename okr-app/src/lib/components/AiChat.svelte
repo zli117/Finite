@@ -23,9 +23,19 @@
 				error?: string;
 			};
 
+	interface WireMessage {
+		role: 'user' | 'assistant';
+		content: string;
+	}
+
 	interface AiMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		// Append-only slice of wire messages this UI turn contributed. Flattened
+		// across all messages = the exact conversation history sent to the LLM.
+		// Apply/Discard pushes one extra <tool_result> entry here so the result
+		// of an applied write is visible to the model on the next turn.
+		wireMessages: WireMessage[];
 		steps?: TranscriptStep[];
 		toolCalls?: ToolCallProposal[];
 		toolStatus?: Record<string, 'pending' | 'applied' | 'discarded' | 'failed'>;
@@ -191,33 +201,30 @@
 		}
 	}
 
-	async function sendMessage(text?: string) {
-		const messageText = text || inputText.trim();
-		if (!messageText || loading) return;
+	let abortController = $state<AbortController | null>(null);
 
-		inputText = '';
-		error = '';
-
-		// Add user message
-		messages = [...messages, { role: 'user', content: messageText }];
-		await scrollToBottom();
-
+	async function runAgentRound() {
+		// Sends the current wire history to the server and appends the assistant's
+		// response. Used both for initial user messages and auto-continuation
+		// after Apply.
+		if (loading) return;
 		loading = true;
-
+		const controller = new AbortController();
+		abortController = controller;
 		try {
-			// Strip tool metadata before sending — the server only expects role+content
-			const wireMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+			const wireHistory: WireMessage[] = messages.flatMap((m) => m.wireMessages);
 
 			const response = await fetch('/api/ai/chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					messages: wireMessages,
+					messages: wireHistory,
 					provider: selectedProvider !== activeProvider ? selectedProvider : undefined,
 					model: selectedModel || undefined,
 					context,
 					contextData: Object.keys(contextData).length > 0 ? contextData : undefined
-				})
+				}),
+				signal: controller.signal
 			});
 
 			const result = await response.json();
@@ -226,7 +233,17 @@
 				throw new Error(result.error || 'Failed to get response');
 			}
 
-			const assistantMsg: AiMessage = { role: 'assistant', content: result.content || '' };
+			const added: WireMessage[] = Array.isArray(result.added) ? result.added : [];
+			const finalText: string =
+				typeof result.content === 'string'
+					? result.content
+					: deriveFinalText(result.steps);
+
+			const assistantMsg: AiMessage = {
+				role: 'assistant',
+				content: finalText,
+				wireMessages: added
+			};
 			if (Array.isArray(result.steps) && result.steps.length > 0) {
 				assistantMsg.steps = result.steps;
 			}
@@ -239,11 +256,72 @@
 			}
 			messages = [...messages, assistantMsg];
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to get AI response';
+			if (err instanceof DOMException && err.name === 'AbortError') {
+				// User cancelled mid-flight — silent.
+			} else {
+				error = err instanceof Error ? err.message : 'Failed to get AI response';
+			}
 		} finally {
 			loading = false;
+			abortController = null;
 			await scrollToBottom();
 		}
+	}
+
+	function stopAgent() {
+		abortController?.abort();
+	}
+
+	async function sendMessage(text?: string) {
+		const messageText = text || inputText.trim();
+		if (!messageText || loading) return;
+
+		inputText = '';
+		error = '';
+
+		const userMsg: AiMessage = {
+			role: 'user',
+			content: messageText,
+			wireMessages: [{ role: 'user', content: messageText }]
+		};
+		messages = [...messages, userMsg];
+		await scrollToBottom();
+
+		await runAgentRound();
+	}
+
+	function deriveFinalText(steps: unknown): string {
+		if (!Array.isArray(steps)) return '';
+		return steps
+			.filter((s): s is TranscriptStep => !!s && (s as TranscriptStep).type === 'text')
+			.map((s) => (s as { type: 'text'; content: string }).content)
+			.join('\n\n');
+	}
+
+	function appendToolResultWire(msg: AiMessage, name: string, payload: string) {
+		msg.wireMessages = [
+			...msg.wireMessages,
+			{ role: 'user', content: `<tool_result name="${name}">\n${payload}\n</tool_result>` }
+		];
+	}
+
+	function appendStepFromApply(
+		msg: AiMessage,
+		call: ToolCallProposal,
+		ok: boolean,
+		result?: unknown,
+		errorMsg?: string
+	) {
+		const step: TranscriptStep = {
+			type: 'tool_call',
+			id: call.id,
+			name: call.name,
+			args: call.args,
+			ok,
+			result,
+			error: errorMsg
+		};
+		msg.steps = [...(msg.steps ?? []), step];
 	}
 
 	async function applyToolCall(msgIndex: number, call: ToolCallProposal) {
@@ -261,16 +339,30 @@
 			if (!response.ok || !result.ok) {
 				msg.toolStatus![call.id] = 'failed';
 				msg.toolError![call.id] = result.error || 'Failed to apply';
+				// Feed the failure back into the wire history so the agent can react
+				// to it on the next turn.
+				appendToolResultWire(msg, call.name, `ERROR: ${result.error || 'Failed to apply'}`);
+				appendStepFromApply(msg, call, false, undefined, result.error || 'Failed to apply');
 				messages = [...messages];
 			} else {
+				// Feed the successful result back so the agent can continue a multi-step
+				// workflow (e.g. "now add 3 KRs to that objective" can use the new id).
+				appendToolResultWire(msg, call.name, JSON.stringify(result.result));
+				appendStepFromApply(msg, call, true, result.result);
+				messages = [...messages];
 				// Refresh the current page so the edit is reflected immediately.
-				// SSE already broadcasts to other tabs; this covers the originating tab
-				// without waiting for the event round-trip.
 				invalidateAll();
+				// Auto-continue the agent loop: the model now sees the tool_result and
+				// can chain follow-up calls. Stops naturally when the model emits a
+				// text-only response (no <tool_call>).
+				await runAgentRound();
 			}
 		} catch (err) {
+			const errorMsg = err instanceof Error ? err.message : 'Failed to apply';
 			msg.toolStatus![call.id] = 'failed';
-			msg.toolError![call.id] = err instanceof Error ? err.message : 'Failed to apply';
+			msg.toolError![call.id] = errorMsg;
+			appendToolResultWire(msg, call.name, `ERROR: ${errorMsg}`);
+			appendStepFromApply(msg, call, false, undefined, errorMsg);
 			messages = [...messages];
 		}
 	}
@@ -279,6 +371,10 @@
 		const msg = messages[msgIndex];
 		if (!msg.toolStatus || msg.toolStatus[call.id] !== 'pending') return;
 		msg.toolStatus[call.id] = 'discarded';
+		// Append a tool_result so the model knows the proposal was declined on
+		// the next turn — otherwise it sees its own dangling <tool_call> and may
+		// re-propose the same write.
+		appendToolResultWire(msg, call.name, 'DISCARDED by user — they chose not to apply this write.');
 		messages = [...messages];
 	}
 
@@ -520,19 +616,30 @@
 			disabled={loading || !hasConfig}
 			rows="2"
 		></textarea>
-		<button
-			class="btn btn-primary send-btn"
-			onclick={() => sendMessage()}
-			disabled={loading || !inputText.trim() || !hasConfig}
-		>
-			{#if loading}
-				...
-			{:else}
+		{#if loading}
+			<button
+				class="btn btn-secondary send-btn"
+				onclick={stopAgent}
+				title="Stop the agent"
+				aria-label="Stop"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="6" y="6" width="12" height="12" rx="1"/>
+				</svg>
+			</button>
+		{:else}
+			<button
+				class="btn btn-primary send-btn"
+				onclick={() => sendMessage()}
+				disabled={!inputText.trim() || !hasConfig}
+				aria-label="Send"
+				title="Send"
+			>
 				<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
 				</svg>
-			{/if}
-		</button>
+			</button>
+		{/if}
 	</div>
 </div>
 

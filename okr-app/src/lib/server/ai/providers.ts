@@ -72,6 +72,38 @@ async function fetchWithTimeout(url: string, options: RequestInit): Promise<Resp
 	}
 }
 
+/**
+ * POST to Anthropic with automatic retry on 429 (rate limit) and 529 (overload).
+ * Honors the `retry-after` header when present; otherwise uses exponential backoff
+ * capped at the timeout budget.
+ */
+async function anthropicFetchWithRetry(body: unknown, apiKey: string): Promise<Response> {
+	const maxAttempts = 4;
+	let attempt = 0;
+	let lastResponse: Response | null = null;
+	while (attempt < maxAttempts) {
+		const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-api-key': apiKey,
+				'anthropic-version': '2023-06-01'
+			},
+			body: JSON.stringify(body)
+		});
+		if (response.status !== 429 && response.status !== 529) return response;
+		lastResponse = response;
+		attempt += 1;
+		if (attempt >= maxAttempts) break;
+		const retryAfter = response.headers.get('retry-after');
+		const headerWait = retryAfter ? parseInt(retryAfter, 10) * 1000 : NaN;
+		// Exponential backoff: 1s, 2s, 4s. Header `retry-after` wins if present.
+		const backoffMs = Number.isFinite(headerWait) ? headerWait : 1000 * Math.pow(2, attempt - 1);
+		await new Promise((r) => setTimeout(r, Math.min(backoffMs, 8000)));
+	}
+	return lastResponse!;
+}
+
 async function sendAnthropicMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
@@ -80,23 +112,35 @@ async function sendAnthropicMessage(
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.anthropic.model!;
 
+	// Prompt caching: mark the (large, stable) system prompt as cacheable, and
+	// mark the last message as a second breakpoint so the growing conversation
+	// prefix is also cached across agent-loop rounds. Anthropic allows up to 4
+	// cache_control breakpoints; we use 2.
+	const systemBlocks = [
+		{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }
+	];
+
+	type ContentBlock = { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } };
+	const wireMessages: { role: 'user' | 'assistant'; content: ContentBlock[] }[] = messages.map(
+		(m) => ({
+			role: m.role,
+			content: [{ type: 'text', text: m.content }]
+		})
+	);
+	if (wireMessages.length > 0) {
+		const last = wireMessages[wireMessages.length - 1];
+		last.content[last.content.length - 1].cache_control = { type: 'ephemeral' };
+	}
+
 	const body: Record<string, unknown> = {
 		model,
 		max_tokens: 4096,
-		system: systemPrompt,
-		messages: messages.map((m) => ({ role: m.role, content: m.content }))
+		system: systemBlocks,
+		messages: wireMessages
 	};
 	if (options?.stopSequences?.length) body.stop_sequences = options.stopSequences;
 
-	const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/json',
-			'x-api-key': config.apiKey!,
-			'anthropic-version': '2023-06-01'
-		},
-		body: JSON.stringify(body)
-	});
+	const response = await anthropicFetchWithRetry(body, config.apiKey!);
 
 	if (!response.ok) {
 		const error = await response.json().catch(() => ({}));

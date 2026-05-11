@@ -22,18 +22,56 @@ sqlite.pragma('journal_mode = WAL');
 // Create Drizzle ORM instance
 export const db = drizzle(sqlite, { schema });
 
-// Run migrations at runtime (not during build) to create/update tables
+// Run migrations at runtime (not during build) to create/update tables.
+//
+// Two paths:
+// 1. Empty DB → run `migrate()` to create every table from scratch.
+// 2. Existing DB (created via `db:push` or previous run) → skip `migrate()`
+//    entirely and rely on the targeted `ensureColumn` calls below for
+//    additive schema changes. The journal table is not a reliable indicator
+//    of which migrations have been applied (it may be empty from a partial
+//    setup), so we don't trust it.
 if (!building) {
 	const migrationsFolder = path.join(process.cwd(), 'drizzle');
-	if (fs.existsSync(migrationsFolder)) {
-		// Check if db was created by db:push (has tables but no migration journal)
-		const tableCount = (sqlite.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '__drizzle_migrations'").get() as { c: number }).c;
-		const hasMigrationJournal = (sqlite.prepare("SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'").get() as { c: number }).c > 0;
+	const tableCount = (
+		sqlite
+			.prepare(
+				"SELECT count(*) as c FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '__drizzle_migrations'"
+			)
+			.get() as { c: number }
+	).c;
 
-		if (tableCount === 0 || hasMigrationJournal) {
-			// Fresh database or previously migrated — run migrations
+	if (tableCount === 0 && fs.existsSync(migrationsFolder)) {
+		try {
 			migrate(db, { migrationsFolder });
+		} catch (err) {
+			console.error('[db] Initial migration failed:', err);
+			throw err;
 		}
+	}
+
+	// Additive schema sync. Idempotent; safe to run on every startup.
+	// Add a new line here for any future column added to an existing table.
+	ensureColumn(sqlite, 'user_ai_config', 'max_agent_rounds', 'INTEGER NOT NULL DEFAULT 20');
+}
+
+function ensureColumn(
+	conn: InstanceType<typeof Database>,
+	table: string,
+	column: string,
+	definition: string
+) {
+	try {
+		const exists = conn
+			.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
+			.get(table);
+		if (!exists) return;
+		const cols = conn.prepare(`PRAGMA table_info('${table}')`).all() as { name: string }[];
+		if (cols.some((c) => c.name === column)) return;
+		conn.exec(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+		console.log(`[db] Added missing column ${table}.${column}`);
+	} catch (err) {
+		console.warn(`[db] Failed to ensure column ${table}.${column}:`, err);
 	}
 }
 

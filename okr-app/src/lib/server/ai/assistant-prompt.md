@@ -50,6 +50,14 @@ The sandbox provides `q` (data fetching + helpers), `render` (markdown/table/plo
 
 Before proposing any write that contains query code, **always** call `run_query` with the candidate code and verify it executed successfully (see Critical Rule 5).
 
+### Pin time scopes explicitly
+
+Queries saved to a KR, widget, or `saved_query` will run again on future dates. If the user's intent describes an absolute period — "this month", "last week", "Q1 2026", "May", "2025" — **resolve it to concrete year/month/week values and hard-code them in the code**. Don't compute the scope from `q.today()` at runtime, because the same query would silently report different data later.
+
+- Absolute: `q.daily({ year: 2026, month: 5 })` — write the literals into the code.
+- Rolling: "last 30 days from whenever this runs" is genuinely relative; computing the window from `q.today()` is correct in that case.
+- When in doubt, use the page period in `## Current State` (above) to resolve "this month/week/day" into a fixed year/month/week and write it out. If the user wants a rolling window instead, ask before saving.
+
 {{API_REFERENCE}}
 
 ## Style

@@ -2,9 +2,28 @@
 	import { renderMarkdown } from '$lib/sanitize';
 	import { tick } from 'svelte';
 
+	interface ToolCallProposal {
+		id: string;
+		name: string;
+		args: Record<string, unknown>;
+		preview: string;
+		category: 'write';
+	}
+
+	interface ReadResultSummary {
+		id: string;
+		name: string;
+		ok: boolean;
+		error?: string;
+	}
+
 	interface AiMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		toolCalls?: ToolCallProposal[];
+		readResults?: ReadResultSummary[];
+		toolStatus?: Record<string, 'pending' | 'applied' | 'discarded' | 'failed'>;
+		toolError?: Record<string, string>;
 	}
 
 	interface ParsedBlock {
@@ -22,13 +41,13 @@
 		context = 'query',
 		contextData = {}
 	}: {
-		onCopyToEditor: (code: string) => void;
+		onCopyToEditor?: (code: string) => void;
 		hasConfig: boolean;
 		configuredProviders: string[];
 		activeProvider: string;
 		providerModels?: Record<string, string[]>;
 		pendingCode?: string;
-		context?: 'query' | 'kr_progress' | 'widget' | 'metric';
+		context?: 'query' | 'kr_progress' | 'widget' | 'metric' | 'assistant';
 		contextData?: Record<string, unknown>;
 	} = $props();
 
@@ -74,11 +93,19 @@
 		ollama: 'Ollama'
 	};
 
-	const suggestions = [
+	const querySuggestions = [
 		'Show my sleep trends this month',
 		'Task completion rate by tag',
 		'Weekly productivity report'
 	];
+
+	const assistantSuggestions = [
+		'What\'s on my plate today?',
+		'Add a 1h task tomorrow: review weekly plan',
+		'List my objectives for this year'
+	];
+
+	const suggestions = $derived(context === 'assistant' ? assistantSuggestions : querySuggestions);
 
 	function parseResponse(content: string): ParsedBlock[] {
 		const blocks: ParsedBlock[] = [];
@@ -142,11 +169,14 @@
 		loading = true;
 
 		try {
+			// Strip tool metadata before sending — the server only expects role+content
+			const wireMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+
 			const response = await fetch('/api/ai/chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					messages,
+					messages: wireMessages,
 					provider: selectedProvider !== activeProvider ? selectedProvider : undefined,
 					model: selectedModel || undefined,
 					context,
@@ -160,12 +190,64 @@
 				throw new Error(result.error || 'Failed to get response');
 			}
 
-			messages = [...messages, { role: 'assistant', content: result.content }];
+			const assistantMsg: AiMessage = { role: 'assistant', content: result.content || '' };
+			if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
+				assistantMsg.toolCalls = result.toolCalls;
+				assistantMsg.toolStatus = Object.fromEntries(
+					result.toolCalls.map((c: ToolCallProposal) => [c.id, 'pending'])
+				);
+				assistantMsg.toolError = {};
+			}
+			if (Array.isArray(result.readResults) && result.readResults.length > 0) {
+				assistantMsg.readResults = result.readResults;
+			}
+			messages = [...messages, assistantMsg];
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to get AI response';
 		} finally {
 			loading = false;
 			await scrollToBottom();
+		}
+	}
+
+	async function applyToolCall(msgIndex: number, call: ToolCallProposal) {
+		const msg = messages[msgIndex];
+		if (!msg.toolStatus || msg.toolStatus[call.id] !== 'pending') return;
+		msg.toolStatus[call.id] = 'applied';
+		messages = [...messages];
+		try {
+			const response = await fetch('/api/ai/tool', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: call.id, name: call.name, args: call.args })
+			});
+			const result = await response.json();
+			if (!response.ok || !result.ok) {
+				msg.toolStatus![call.id] = 'failed';
+				msg.toolError![call.id] = result.error || 'Failed to apply';
+				messages = [...messages];
+			}
+		} catch (err) {
+			msg.toolStatus![call.id] = 'failed';
+			msg.toolError![call.id] = err instanceof Error ? err.message : 'Failed to apply';
+			messages = [...messages];
+		}
+	}
+
+	function discardToolCall(msgIndex: number, call: ToolCallProposal) {
+		const msg = messages[msgIndex];
+		if (!msg.toolStatus || msg.toolStatus[call.id] !== 'pending') return;
+		msg.toolStatus[call.id] = 'discarded';
+		messages = [...messages];
+	}
+
+	async function applyAllPending(msgIndex: number) {
+		const msg = messages[msgIndex];
+		if (!msg.toolCalls || !msg.toolStatus) return;
+		for (const c of msg.toolCalls) {
+			if (msg.toolStatus[c.id] === 'pending') {
+				await applyToolCall(msgIndex, c);
+			}
 		}
 	}
 
@@ -254,12 +336,21 @@
 				</div>
 			</div>
 		{:else}
-			{#each messages as message}
+			{#each messages as message, msgIndex}
 				<div class="message message-{message.role}">
 					<div class="message-role">{message.role === 'user' ? 'You' : 'AI'}</div>
 					{#if message.role === 'user'}
 						<div class="message-content">{message.content}</div>
 					{:else}
+						{#if message.readResults && message.readResults.length > 0}
+							<div class="read-summary">
+								{#each message.readResults as r}
+									<span class="read-pill" class:read-pill-err={!r.ok}>
+										{r.ok ? '✓' : '✗'} {r.name}
+									</span>
+								{/each}
+							</div>
+						{/if}
 						{#each parseResponse(message.content) as block}
 							{#if block.type === 'text'}
 								<div class="message-text">
@@ -269,12 +360,14 @@
 								<div class="code-block">
 									<pre><code>{block.content}</code></pre>
 									<div class="code-actions">
-										<button
-											class="btn btn-primary btn-xs"
-											onclick={() => onCopyToEditor(block.content)}
-										>
-											Copy to Editor
-										</button>
+										{#if onCopyToEditor}
+											<button
+												class="btn btn-primary btn-xs"
+												onclick={() => onCopyToEditor?.(block.content)}
+											>
+												Copy to Editor
+											</button>
+										{/if}
 										<button
 											class="btn btn-secondary btn-xs"
 											onclick={() => copyToClipboard(block.content)}
@@ -285,6 +378,55 @@
 								</div>
 							{/if}
 						{/each}
+						{#if message.toolCalls && message.toolCalls.length > 0}
+							{@const pendingCount = message.toolCalls.filter(
+								(c) => message.toolStatus?.[c.id] === 'pending'
+							).length}
+							<div class="tool-calls">
+								{#each message.toolCalls as call}
+									{@const status = message.toolStatus?.[call.id] ?? 'pending'}
+									<div class="tool-card tool-card-{status}">
+										<div class="tool-card-body">
+											<div class="tool-name">{call.name}</div>
+											<div class="tool-preview">{call.preview}</div>
+											{#if status === 'failed' && message.toolError?.[call.id]}
+												<div class="tool-error">{message.toolError[call.id]}</div>
+											{/if}
+										</div>
+										<div class="tool-actions">
+											{#if status === 'pending'}
+												<button
+													class="btn btn-primary btn-xs"
+													onclick={() => applyToolCall(msgIndex, call)}
+												>
+													Apply
+												</button>
+												<button
+													class="btn btn-secondary btn-xs"
+													onclick={() => discardToolCall(msgIndex, call)}
+												>
+													Discard
+												</button>
+											{:else if status === 'applied'}
+												<span class="tool-status tool-status-applied">Applied</span>
+											{:else if status === 'discarded'}
+												<span class="tool-status">Discarded</span>
+											{:else if status === 'failed'}
+												<span class="tool-status tool-status-failed">Failed</span>
+											{/if}
+										</div>
+									</div>
+								{/each}
+								{#if pendingCount > 1}
+									<button
+										class="btn btn-primary btn-xs apply-all"
+										onclick={() => applyAllPending(msgIndex)}
+									>
+										Apply all {pendingCount}
+									</button>
+								{/if}
+							</div>
+						{/if}
 					{/if}
 				</div>
 			{/each}
@@ -617,5 +759,113 @@
 		align-items: center;
 		justify-content: center;
 		border-radius: var(--radius-md);
+	}
+
+	/* Tool call cards (assistant context) */
+	.read-summary {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		margin: 2px 0 4px;
+	}
+
+	.read-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 0.6875rem;
+		padding: 1px 6px;
+		border-radius: 10px;
+		background: var(--color-bg);
+		color: var(--color-text-muted);
+		border: 1px solid var(--color-border);
+	}
+
+	.read-pill-err {
+		background: #fef2f2;
+		color: var(--color-error);
+		border-color: #fecaca;
+	}
+
+	.tool-calls {
+		display: flex;
+		flex-direction: column;
+		gap: var(--spacing-xs);
+		margin-top: var(--spacing-xs);
+	}
+
+	.tool-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--spacing-sm);
+		padding: var(--spacing-sm) var(--spacing-md);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		background: var(--color-surface, white);
+	}
+
+	.tool-card-applied {
+		border-color: #bbf7d0;
+		background: #f0fdf4;
+	}
+
+	.tool-card-discarded {
+		opacity: 0.55;
+	}
+
+	.tool-card-failed {
+		border-color: #fecaca;
+		background: #fef2f2;
+	}
+
+	.tool-card-body {
+		min-width: 0;
+		flex: 1;
+	}
+
+	.tool-name {
+		font-size: 0.6875rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--color-text-muted);
+		font-weight: 600;
+	}
+
+	.tool-preview {
+		font-size: 0.8125rem;
+		line-height: 1.4;
+		color: var(--color-text);
+		word-break: break-word;
+	}
+
+	.tool-error {
+		font-size: 0.75rem;
+		color: var(--color-error);
+		margin-top: 2px;
+	}
+
+	.tool-actions {
+		display: flex;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.tool-status {
+		font-size: 0.6875rem;
+		color: var(--color-text-muted);
+		padding: 2px 8px;
+	}
+
+	.tool-status-applied {
+		color: #15803d;
+	}
+
+	.tool-status-failed {
+		color: var(--color-error);
+	}
+
+	.apply-all {
+		align-self: flex-end;
 	}
 </style>

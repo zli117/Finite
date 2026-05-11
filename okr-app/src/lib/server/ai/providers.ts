@@ -17,6 +17,17 @@ export interface AiProviderConfig {
 export interface AiResponse {
 	content: string;
 	error?: string;
+	/** True when the model was halted by a stop sequence (so the sequence is NOT in `content`). */
+	stoppedOnSequence?: boolean;
+}
+
+export interface AiSendOptions {
+	/**
+	 * Stop sequences. The model halts generation when one is emitted; the matched
+	 * text is NOT included in the returned content. Used for tool-use one-at-a-time
+	 * pacing.
+	 */
+	stopSequences?: string[];
 }
 
 export type AiProvider = 'anthropic' | 'openai' | 'gemini' | 'openrouter' | 'ollama';
@@ -64,9 +75,18 @@ async function fetchWithTimeout(url: string, options: RequestInit): Promise<Resp
 async function sendAnthropicMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.anthropic.model!;
+
+	const body: Record<string, unknown> = {
+		model,
+		max_tokens: 4096,
+		system: systemPrompt,
+		messages: messages.map((m) => ({ role: m.role, content: m.content }))
+	};
+	if (options?.stopSequences?.length) body.stop_sequences = options.stopSequences;
 
 	const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
 		method: 'POST',
@@ -75,12 +95,7 @@ async function sendAnthropicMessage(
 			'x-api-key': config.apiKey!,
 			'anthropic-version': '2023-06-01'
 		},
-		body: JSON.stringify({
-			model,
-			max_tokens: 4096,
-			system: systemPrompt,
-			messages: messages.map((m) => ({ role: m.role, content: m.content }))
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -90,18 +105,32 @@ async function sendAnthropicMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `Anthropic error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { content?: { type: string; text: string }[] }).content?.[0]?.text || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		content?: { type: string; text: string }[];
+		stop_reason?: string;
+	};
+	const text = data.content?.[0]?.text || '';
+	return { content: text, stoppedOnSequence: data.stop_reason === 'stop_sequence' };
 }
 
 async function sendOpenAiMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
 	messages: AiMessage[],
-	baseUrl = 'https://api.openai.com'
+	baseUrl = 'https://api.openai.com',
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.openai.model!;
+
+	const body: Record<string, unknown> = {
+		model,
+		max_tokens: 4096,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) body.stop = options.stopSequences;
 
 	const response = await fetchWithTimeout(`${baseUrl}/v1/chat/completions`, {
 		method: 'POST',
@@ -109,14 +138,7 @@ async function sendOpenAiMessage(
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${config.apiKey}`
 		},
-		body: JSON.stringify({
-			model,
-			max_tokens: 4096,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -126,33 +148,41 @@ async function sendOpenAiMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `API error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		choices?: { message?: { content?: string }; finish_reason?: string }[];
+	};
+	const text = data.choices?.[0]?.message?.content || '';
+	const stoppedOnSequence = data.choices?.[0]?.finish_reason === 'stop';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendGeminiMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	const model = config.model || PROVIDER_DEFAULTS.gemini.model!;
 
-	// Convert messages to Gemini format
 	const contents = messages.map((m) => ({
 		role: m.role === 'assistant' ? 'model' : 'user',
 		parts: [{ text: m.content }]
 	}));
+
+	const body: Record<string, unknown> = {
+		systemInstruction: { parts: [{ text: systemPrompt }] },
+		contents
+	};
+	if (options?.stopSequences?.length) {
+		body.generationConfig = { stopSequences: options.stopSequences };
+	}
 
 	const response = await fetchWithTimeout(
 		`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
 		{
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', 'x-goog-api-key': config.apiKey },
-			body: JSON.stringify({
-				systemInstruction: { parts: [{ text: systemPrompt }] },
-				contents
-			})
+			body: JSON.stringify(body)
 		}
 	);
 
@@ -163,9 +193,12 @@ async function sendGeminiMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `Gemini error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { candidates?: { content?: { parts?: { text?: string }[] } }[] }).candidates?.[0]?.content?.parts?.[0]?.text || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+	};
+	const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+	const stoppedOnSequence = data.candidates?.[0]?.finishReason === 'STOP';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendOpenRouterMessage(

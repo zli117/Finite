@@ -2,6 +2,7 @@
 	import type { Snippet } from 'svelte';
 	import MonacoEditor from './MonacoEditor.svelte';
 	import AiChat from './AiChat.svelte';
+	import type { AiChatContext } from '$lib/ai/types';
 
 	interface Props {
 		value: string;
@@ -13,7 +14,7 @@
 		providerModels?: Record<string, string[]>;
 		aiCollapsed?: boolean;
 		headerSnippet?: Snippet;
-		context?: 'query' | 'kr_progress' | 'widget' | 'metric';
+		context?: AiChatContext;
 		contextData?: Record<string, unknown>;
 	}
 

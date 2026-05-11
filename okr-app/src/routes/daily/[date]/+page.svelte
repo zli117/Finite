@@ -2,12 +2,15 @@
 	import { goto, invalidateAll } from '$app/navigation';
 	import TaskList from '$lib/components/TaskList.svelte';
 	import TaskForm from '$lib/components/TaskForm.svelte';
+	import AiChat from '$lib/components/AiChat.svelte';
 	import type { Task, Tag } from '$lib/types';
 	import type { MetricDefinition } from '$lib/db/schema';
+	import type { AiAction } from '$lib/ai/types';
 
 	let { data } = $props();
 
 	let error = $state('');
+	let showAiAssistant = $state(false);
 
 	// Client-side flexible metrics loading (avoids blocking page on slow plugin API calls)
 	let flexibleMetrics = $state<{
@@ -85,7 +88,7 @@
 
 	// Calculate total expected hours for the day
 	const totalExpectedHours = $derived(() => {
-		return data.tasks.reduce((sum, task) => {
+		return data.tasks.reduce((sum: number, task: Task) => {
 			const hours = parseFloat(task.attributes?.expected_hours || '0');
 			return sum + (isNaN(hours) ? 0 : hours);
 		}, 0);
@@ -240,6 +243,159 @@
 		journalSaved = false;
 	}
 
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === 'object' && value !== null && !Array.isArray(value);
+	}
+
+	function asString(value: unknown): string {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function asNumber(value: unknown): number | null {
+		return typeof value === 'number' && Number.isFinite(value) ? value : null;
+	}
+
+	async function resolveTagIds(tagNames: unknown): Promise<string[]> {
+		if (!Array.isArray(tagNames)) return [];
+		const ids: string[] = [];
+		for (const rawName of tagNames) {
+			const name = asString(rawName);
+			if (!name) continue;
+			const existing = localTags.find((tag) => tag.name.toLowerCase() === name.toLowerCase());
+			if (existing) {
+				ids.push(existing.id);
+				continue;
+			}
+			const created = await createTag(name);
+			if (created) ids.push(created.id);
+		}
+		return ids;
+	}
+
+	async function createTaskFromAi(periodId: string, payload: Record<string, unknown>) {
+		const title = asString(payload.title);
+		if (!title) throw new Error('AI action is missing a task title');
+
+		const attributes: Record<string, string> = {};
+		const expectedHours = asNumber(payload.expectedHours);
+		if (expectedHours !== null && expectedHours > 0) {
+			attributes.expected_hours = String(expectedHours);
+		}
+
+		const response = await fetch('/api/tasks', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				timePeriodId: periodId,
+				title,
+				attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
+				tagIds: await resolveTagIds(payload.tagNames)
+			})
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to create task from AI action');
+		}
+	}
+
+	function findVisibleTask(taskId: string): Task | undefined {
+		return [...data.tasks, ...data.weeklyInitiatives].find((task: Task) => task.id === taskId);
+	}
+
+	async function updateTaskFromAi(payload: Record<string, unknown>) {
+		const taskId = asString(payload.taskId);
+		if (!taskId) throw new Error('AI action needs taskId');
+
+		const existing = findVisibleTask(taskId);
+		const attributes = { ...(existing?.attributes ?? {}) };
+		if ('expectedHours' in payload) {
+			const expectedHours = asNumber(payload.expectedHours);
+			if (expectedHours !== null && expectedHours > 0) {
+				attributes.expected_hours = String(expectedHours);
+			} else {
+				delete attributes.expected_hours;
+			}
+		}
+
+		const updates: Partial<Task> & { tagIds?: string[] } = {};
+		const title = asString(payload.title);
+		if (title) updates.title = title;
+		if (typeof payload.completed === 'boolean') updates.completed = payload.completed;
+		if ('expectedHours' in payload) updates.attributes = attributes;
+		if ('tagNames' in payload) updates.tagIds = await resolveTagIds(payload.tagNames);
+
+		const response = await fetch(`/api/tasks/${taskId}`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(updates)
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to update task from AI action');
+		}
+	}
+
+	async function saveJournalFromAi(journal: string) {
+		if (!data.period?.id) throw new Error('No daily period available');
+		const response = await fetch(`/api/periods/${data.period.id}/journal`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ notes: journal })
+		});
+
+		if (!response.ok) throw new Error('Failed to save journal from AI action');
+		journalText = journal;
+		journalDirty = false;
+		journalSaved = true;
+	}
+
+	async function handleAiAction(action: AiAction) {
+		error = '';
+		if (!isRecord(action.payload)) {
+			error = 'AI action payload must be an object';
+			return;
+		}
+
+		try {
+			if (action.type === 'add_daily_tasks') {
+				const periodId = data.period?.id;
+				if (!periodId) throw new Error('No daily period available');
+				if (!Array.isArray(action.payload.tasks)) throw new Error('AI action is missing tasks');
+				for (const task of action.payload.tasks) {
+					if (isRecord(task)) {
+						await createTaskFromAi(periodId, task);
+					}
+				}
+				await invalidateAll();
+			} else if (action.type === 'update_task') {
+				await updateTaskFromAi(action.payload);
+				await invalidateAll();
+			} else if (action.type === 'toggle_task') {
+				const taskId = asString(action.payload.taskId);
+				if (!taskId) throw new Error('AI action needs taskId');
+				await toggleTask(taskId);
+			} else if (action.type === 'delete_task') {
+				const taskId = asString(action.payload.taskId);
+				if (!taskId) throw new Error('AI action needs taskId');
+				await deleteTask(taskId);
+			} else if (action.type === 'draft_journal') {
+				const journal = asString(action.payload.journal);
+				if (!journal) throw new Error('AI action is missing journal text');
+				handleJournalChange(journal);
+			} else if (action.type === 'save_journal') {
+				const journal = asString(action.payload.journal);
+				if (!journal) throw new Error('AI action is missing journal text');
+				await saveJournalFromAi(journal);
+			} else {
+				throw new Error(`Unsupported AI action: ${action.type}`);
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to apply AI action';
+		}
+	}
+
 	async function saveJournal() {
 		if (!data.period?.id) return;
 		journalSaving = true;
@@ -383,6 +539,48 @@
 	{/if}
 
 	<div class="daily-content">
+		<section class="card ai-assistant-section">
+			<div class="section-header">
+				<h2 class="section-title">AI Assistant</h2>
+				<button class="btn btn-secondary btn-sm" onclick={() => showAiAssistant = !showAiAssistant}>
+					{showAiAssistant ? 'Hide' : 'Open'}
+				</button>
+			</div>
+			{#if showAiAssistant}
+				<div class="ai-chat-shell">
+					<AiChat
+						hasConfig={data.aiConfig?.hasAiConfig ?? false}
+						configuredProviders={data.aiConfig?.configuredProviders ?? []}
+						activeProvider={data.aiConfig?.activeProvider ?? 'anthropic'}
+						providerModels={data.aiConfig?.providerModels ?? {}}
+						context="daily_plan"
+						contextData={{
+							date: data.date,
+							tasks: data.tasks.map((task: Task) => ({
+								id: task.id,
+								title: task.title,
+								completed: task.completed,
+								expectedHours: task.attributes?.expected_hours,
+								tagIds: task.tagIds
+							})),
+							weeklyInitiatives: data.weeklyInitiatives.map((task: Task) => ({
+								id: task.id,
+								title: task.title,
+								completed: task.completed,
+								expectedHours: task.attributes?.expected_hours,
+								tagIds: task.tagIds
+							})),
+							tags: localTags.map((tag) => ({ id: tag.id, name: tag.name, category: tag.category })),
+							journal: journalText,
+							metrics: flexibleMetrics
+						}}
+						onAction={handleAiAction}
+						welcomeText="Ask me to plan this day, create tasks, or draft the journal."
+					/>
+				</div>
+			{/if}
+		</section>
+
 		<!-- Tasks Card -->
 		<section class="card tasks-section">
 			<div class="section-header">
@@ -584,6 +782,13 @@
 
 	.tasks-section {
 		min-height: 200px;
+	}
+
+	.ai-chat-shell {
+		height: 520px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
 	}
 
 	/* Metrics section */

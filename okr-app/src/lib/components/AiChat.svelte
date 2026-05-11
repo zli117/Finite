@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/sanitize';
 	import { tick } from 'svelte';
+	import type { AiAction, AiChatContext } from '$lib/ai/types';
 
 	interface AiMessage {
 		role: 'user' | 'assistant';
@@ -8,28 +9,42 @@
 	}
 
 	interface ParsedBlock {
-		type: 'text' | 'code';
+		type: 'text' | 'code' | 'action';
 		content: string;
+		actionType?: string;
+		label?: string;
+		payload?: unknown;
+		parseError?: string;
 	}
 
 	let {
 		onCopyToEditor,
+		editorActionLabel = 'Copy to Editor',
+		onAction,
 		hasConfig,
 		configuredProviders = [],
 		activeProvider = 'anthropic',
 		providerModels = {},
 		pendingCode = $bindable(''),
 		context = 'query',
-		contextData = {}
+		contextData = {},
+		suggestions,
+		welcomeText,
+		placeholder
 	}: {
-		onCopyToEditor: (code: string) => void;
+		onCopyToEditor?: (code: string) => void;
+		editorActionLabel?: string;
+		onAction?: (action: AiAction) => void | Promise<void>;
 		hasConfig: boolean;
 		configuredProviders: string[];
 		activeProvider: string;
 		providerModels?: Record<string, string[]>;
 		pendingCode?: string;
-		context?: 'query' | 'kr_progress' | 'widget' | 'metric';
+		context?: AiChatContext;
 		contextData?: Record<string, unknown>;
+		suggestions?: string[];
+		welcomeText?: string;
+		placeholder?: string;
 	} = $props();
 
 	let messages = $state<AiMessage[]>([]);
@@ -74,15 +89,24 @@
 		ollama: 'Ollama'
 	};
 
-	const suggestions = [
-		'Show my sleep trends this month',
-		'Task completion rate by tag',
-		'Weekly productivity report'
-	];
+	const defaultSuggestions: Record<AiChatContext, string[]> = {
+		query: ['Show my sleep trends this month', 'Task completion rate by tag', 'Weekly productivity report'],
+		kr_progress: ['Write progress code for this key result', 'Explain why this progress query fails', 'Use daily metrics to score this KR'],
+		widget: ['Make a compact weekly summary widget', 'Chart my sleep and steps', 'Show progress by tag'],
+		metric: ['Create a sleep quality expression', 'Compute active minutes percent', 'Convert this time metric to minutes'],
+		objectives: ['Draft objectives for this period', 'Make these KRs measurable', 'Write a reflection from this progress'],
+		daily_plan: ['Plan a focused day', 'Turn this week into tasks for today', 'Draft a short journal entry'],
+		weekly_plan: ['Plan this week from current objectives', 'Create three weekly initiatives', 'Balance my week by effort'],
+		metrics_template: ['Design a simple health metrics template', 'Add computed metrics for sleep and activity', 'Review this template']
+	};
+
+	const visibleSuggestions = $derived(suggestions ?? defaultSuggestions[context] ?? defaultSuggestions.query);
+	const visibleWelcomeText = $derived(welcomeText ?? (context === 'query' ? 'Ask me to write queries for your data.' : 'Ask me to help with this screen.'));
+	const visiblePlaceholder = $derived(placeholder ?? (context === 'query' ? 'Ask about your data...' : 'Tell AI what to change or draft...'));
 
 	function parseResponse(content: string): ParsedBlock[] {
 		const blocks: ParsedBlock[] = [];
-		const regex = /<code>([\s\S]*?)<\/code>/g;
+		const regex = /<code>([\s\S]*?)<\/code>|<ruok-action(?:\s+type="([^"]+)")?(?:\s+label="([^"]+)")?\s*>([\s\S]*?)<\/ruok-action>/g;
 		let lastIndex = 0;
 		let match;
 
@@ -90,7 +114,27 @@
 			if (match.index > lastIndex) {
 				blocks.push({ type: 'text', content: content.slice(lastIndex, match.index) });
 			}
-			blocks.push({ type: 'code', content: match[1].trim() });
+
+			if (match[1] !== undefined) {
+				blocks.push({ type: 'code', content: match[1].trim() });
+			} else {
+				const raw = (match[4] || '').trim();
+				let payload: unknown = raw;
+				let parseError: string | undefined;
+				try {
+					payload = JSON.parse(raw);
+				} catch (err) {
+					parseError = err instanceof Error ? err.message : 'Invalid JSON';
+				}
+				blocks.push({
+					type: 'action',
+					content: raw,
+					actionType: match[2] || 'unknown',
+					label: match[3],
+					payload,
+					parseError
+				});
+			}
 			lastIndex = match.index + match[0].length;
 		}
 
@@ -104,6 +148,16 @@
 		}
 
 		return blocks;
+	}
+
+	async function applyAction(block: ParsedBlock) {
+		if (!onAction || !block.actionType || block.parseError) return;
+		await onAction({
+			type: block.actionType,
+			label: block.label,
+			payload: block.payload,
+			raw: block.content
+		});
 	}
 
 
@@ -244,9 +298,9 @@
 			</div>
 		{:else if messages.length === 0}
 			<div class="welcome">
-				<p class="welcome-text">Ask me to write queries for your data.</p>
+				<p class="welcome-text">{visibleWelcomeText}</p>
 				<div class="suggestions">
-					{#each suggestions as suggestion}
+					{#each visibleSuggestions as suggestion}
 						<button class="suggestion-btn" onclick={() => sendMessage(suggestion)}>
 							{suggestion}
 						</button>
@@ -265,16 +319,45 @@
 								<div class="message-text">
 									{@html renderMarkdown(block.content)}
 								</div>
-							{:else}
+							{:else if block.type === 'code'}
 								<div class="code-block">
 									<pre><code>{block.content}</code></pre>
 									<div class="code-actions">
+										{#if onCopyToEditor}
+											<button
+												class="btn btn-primary btn-xs"
+												onclick={() => onCopyToEditor?.(block.content)}
+											>
+												{editorActionLabel}
+											</button>
+										{/if}
 										<button
-											class="btn btn-primary btn-xs"
-											onclick={() => onCopyToEditor(block.content)}
+											class="btn btn-secondary btn-xs"
+											onclick={() => copyToClipboard(block.content)}
 										>
-											Copy to Editor
+											Copy
 										</button>
+									</div>
+								</div>
+							{:else}
+								<div class="action-block">
+									<div class="action-header">
+										<span>{block.label || block.actionType}</span>
+									</div>
+									{#if block.parseError}
+										<div class="action-error">Invalid action JSON: {block.parseError}</div>
+									{:else}
+										<pre><code>{block.content}</code></pre>
+									{/if}
+									<div class="code-actions">
+										{#if onAction && !block.parseError}
+											<button
+												class="btn btn-primary btn-xs"
+												onclick={() => applyAction(block)}
+											>
+												Apply
+											</button>
+										{/if}
 										<button
 											class="btn btn-secondary btn-xs"
 											onclick={() => copyToClipboard(block.content)}
@@ -308,7 +391,7 @@
 		<textarea
 			bind:this={inputTextarea}
 			bind:value={inputText}
-			placeholder={hasConfig ? 'Ask about your data...' : 'Configure AI provider first'}
+			placeholder={hasConfig ? visiblePlaceholder : 'Configure AI provider first'}
 			onkeydown={handleKeydown}
 			disabled={loading || !hasConfig}
 			rows="2"
@@ -516,7 +599,27 @@
 		overflow: hidden;
 	}
 
-	.code-block pre {
+	.action-block {
+		margin: var(--spacing-xs) 0;
+		border: 1px solid var(--color-primary);
+		border-radius: var(--radius-md);
+		overflow: hidden;
+		background: rgb(59 130 246 / 0.04);
+	}
+
+	.action-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: var(--spacing-xs) var(--spacing-sm);
+		border-bottom: 1px solid rgb(59 130 246 / 0.18);
+		font-size: 0.75rem;
+		font-weight: 700;
+		color: var(--color-primary);
+	}
+
+	.code-block pre,
+	.action-block pre {
 		margin: 0;
 		padding: var(--spacing-sm) var(--spacing-md);
 		background: var(--color-bg);
@@ -527,8 +630,15 @@
 		overflow-y: auto;
 	}
 
-	.code-block pre code {
+	.code-block pre code,
+	.action-block pre code {
 		font-family: monospace;
+	}
+
+	.action-error {
+		padding: var(--spacing-sm) var(--spacing-md);
+		color: var(--color-error);
+		font-size: 0.75rem;
 	}
 
 	.code-actions {

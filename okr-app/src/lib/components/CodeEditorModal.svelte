@@ -1,5 +1,6 @@
 <script lang="ts">
 	import CodeWithAi from './CodeWithAi.svelte';
+	import type { AiChatContext } from '$lib/ai/types';
 
 	interface Props {
 		open: boolean;
@@ -10,7 +11,7 @@
 		activeProvider: string;
 		providerModels?: Record<string, string[]>;
 		onSave?: (code: string) => void;
-		context?: 'query' | 'kr_progress' | 'widget' | 'metric';
+		context?: AiChatContext;
 		contextData?: Record<string, unknown>;
 	}
 

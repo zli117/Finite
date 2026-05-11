@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
+	import type { AiChatContext } from '$lib/ai/types';
 
 	let { data } = $props();
 
@@ -11,6 +12,17 @@
 		{ id: 'gemini', label: 'Gemini', needsApiKey: true, needsBaseUrl: false },
 		{ id: 'openrouter', label: 'OpenRouter', needsApiKey: true, needsBaseUrl: false },
 		{ id: 'ollama', label: 'Ollama', needsApiKey: false, needsBaseUrl: true }
+	];
+
+	const contextDocs: Array<{ id: AiChatContext; label: string; desc: string }> = [
+		{ id: 'query', label: 'Query Builder', desc: 'When writing queries in the Query Builder' },
+		{ id: 'kr_progress', label: 'KR Progress', desc: 'When writing Key Result progress calculations' },
+		{ id: 'widget', label: 'Dashboard Widget', desc: 'When writing dashboard widget code' },
+		{ id: 'metric', label: 'Computed Metric', desc: 'When writing computed metric expressions' },
+		{ id: 'objectives', label: 'Objectives', desc: 'When drafting objectives, key results, and reflections' },
+		{ id: 'daily_plan', label: 'Daily Planning', desc: 'When creating daily tasks and journal drafts' },
+		{ id: 'weekly_plan', label: 'Weekly Planning', desc: 'When creating weekly initiatives' },
+		{ id: 'metrics_template', label: 'Metrics Template', desc: 'When designing metrics templates' }
 	];
 
 	// Per-provider form state
@@ -505,7 +517,7 @@
 			<summary class="provider-header">
 				<div class="provider-title">
 					<span class="provider-name">Context-Specific Instructions</span>
-					<span class="provider-summary">4 contexts</span>
+					<span class="provider-summary">8 contexts</span>
 				</div>
 				<svg class="chevron" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 					<path d="M6 9l6 6 6-6"/>
@@ -517,12 +529,7 @@
 					These instructions are appended to the system prompt based on where the AI is used. They are not editable.
 				</p>
 
-				{#each [
-					{ id: 'query', label: 'Query Builder', desc: 'When writing queries in the Query Builder' },
-					{ id: 'kr_progress', label: 'KR Progress', desc: 'When writing Key Result progress calculations' },
-					{ id: 'widget', label: 'Dashboard Widget', desc: 'When writing dashboard widget code' },
-					{ id: 'metric', label: 'Computed Metric', desc: 'When writing computed metric expressions' }
-				] as ctx}
+				{#each contextDocs as ctx}
 					<div class="context-block">
 						<div class="context-header">
 							<span class="context-label">{ctx.label}</span>

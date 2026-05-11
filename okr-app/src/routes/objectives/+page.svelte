@@ -4,6 +4,8 @@
 	import KRWidget from '$lib/components/KRWidget.svelte';
 	import CodeEditorModal from '$lib/components/CodeEditorModal.svelte';
 	import CircularProgress from '$lib/components/CircularProgress.svelte';
+	import AiChat from '$lib/components/AiChat.svelte';
+	import type { AiAction } from '$lib/ai/types';
 
 	const OBJECTIVE_COLORS = [
 		{ bg: 'linear-gradient(135deg, #FEE2E2, #FFF1F2)', accent: '#E84057', badge: '#FEE2E2' },
@@ -17,6 +19,7 @@
 	let { data } = $props();
 
 	let showNewObjective = $state(false);
+	let showAiAssistant = $state(false);
 	let loading = $state(false);
 	let error = $state('');
 
@@ -246,6 +249,221 @@
 		reflectionText = text;
 		reflectionDirty = true;
 		reflectionSaved = false;
+	}
+
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === 'object' && value !== null && !Array.isArray(value);
+	}
+
+	function asString(value: unknown): string {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function asNumber(value: unknown, fallback: number): number {
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function asNullableString(value: unknown): string | null {
+		const text = asString(value);
+		return text || null;
+	}
+
+	function normalizeCheckboxItems(value: unknown): string | null {
+		if (!Array.isArray(value)) return null;
+		const items: Array<{ id: string; label: string; completed: boolean }> = [];
+		for (const item of value) {
+			const label = typeof item === 'string' ? item : isRecord(item) ? asString(item.label) : '';
+			if (label) {
+				items.push({ id: crypto.randomUUID(), label, completed: false });
+			}
+		}
+		return items.length > 0 ? JSON.stringify(items) : null;
+	}
+
+	async function createKeyResultFromAi(objectiveId: string, payload: Record<string, unknown>) {
+		const title = asString(payload.title);
+		if (!title) throw new Error('AI action is missing a key result title');
+
+		const requestedMeasurementType = asString(payload.measurementType);
+		const progressQueryCode = asString(payload.progressQueryCode);
+		const measurementType = requestedMeasurementType === 'custom_query' || progressQueryCode
+			? 'custom_query'
+			: 'checkboxes';
+		const checkboxItems = normalizeCheckboxItems(payload.checkboxItems);
+		const response = await fetch(`/api/objectives/${objectiveId}/key-results`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				title,
+				details: asString(payload.details) || null,
+				weight: asNumber(payload.weight, 1),
+				expectedHours: asNumber(payload.expectedHours, 0),
+				measurementType,
+				checkboxItems: measurementType === 'checkboxes' ? checkboxItems : null,
+				progressQueryId: measurementType === 'custom_query' ? asNullableString(payload.progressQueryId) : null,
+				progressQueryCode: measurementType === 'custom_query' ? progressQueryCode || null : null
+			})
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to create key result from AI action');
+		}
+	}
+
+	async function updateKeyResultFromAi(objectiveId: string, krId: string, payload: Record<string, unknown>) {
+		if (!objectiveId || !krId) throw new Error('AI action needs objectiveId and krId');
+
+		const updates: Record<string, unknown> = {};
+		const title = asString(payload.title);
+		const details = asString(payload.details);
+		const requestedMeasurementType = asString(payload.measurementType);
+		const progressQueryCode = asString(payload.progressQueryCode);
+		const checkboxItems = normalizeCheckboxItems(payload.checkboxItems);
+
+		if (title) updates.title = title;
+		if ('details' in payload) updates.details = details || null;
+		if ('weight' in payload) updates.weight = asNumber(payload.weight, 1);
+		if ('expectedHours' in payload) updates.expectedHours = asNumber(payload.expectedHours, 0);
+		if (requestedMeasurementType === 'custom_query' || progressQueryCode) {
+			updates.measurementType = 'custom_query';
+			updates.checkboxItems = null;
+			updates.progressQueryId = asNullableString(payload.progressQueryId);
+			updates.progressQueryCode = progressQueryCode || null;
+		} else if (requestedMeasurementType === 'checkboxes' || checkboxItems) {
+			updates.measurementType = 'checkboxes';
+			updates.checkboxItems = checkboxItems;
+			updates.progressQueryId = null;
+			updates.progressQueryCode = null;
+		}
+
+		const response = await fetch(`/api/objectives/${objectiveId}/key-results/${krId}`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(updates)
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to update key result from AI action');
+		}
+	}
+
+	async function saveReflectionFromAi(reflection: string) {
+		const response = await fetch('/api/objectives/reflections', {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				level: data.level,
+				year: data.year,
+				month: data.month,
+				reflection
+			})
+		});
+
+		if (!response.ok) throw new Error('Failed to save reflection from AI action');
+		reflectionText = reflection;
+		reflectionDirty = false;
+		reflectionSaved = true;
+	}
+
+	async function handleAiAction(action: AiAction) {
+		error = '';
+		if (!isRecord(action.payload)) {
+			error = 'AI action payload must be an object';
+			return;
+		}
+
+		try {
+			if (action.type === 'create_objective') {
+				const title = asString(action.payload.title);
+				if (!title) throw new Error('AI action is missing an objective title');
+
+				const payload: Record<string, unknown> = {
+					level: data.level,
+					year: data.year,
+					title,
+					description: asString(action.payload.description) || null,
+					weight: asNumber(action.payload.weight, 1),
+					colorIndex: asNumber(action.payload.colorIndex, localObjectives.length % OBJECTIVE_COLORS.length)
+				};
+				if (data.level === 'monthly' && data.month) payload.month = data.month;
+
+				const response = await fetch('/api/objectives', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload)
+				});
+				if (!response.ok) {
+					const result = await response.json();
+					throw new Error(result.error || 'Failed to create objective from AI action');
+				}
+
+				const { objective } = await response.json();
+				if (objective?.id && Array.isArray(action.payload.keyResults)) {
+					for (const kr of action.payload.keyResults) {
+						if (isRecord(kr)) {
+							await createKeyResultFromAi(objective.id, kr);
+						}
+					}
+				}
+				await invalidateAll();
+			} else if (action.type === 'update_objective') {
+				const objectiveId = asString(action.payload.objectiveId);
+				if (!objectiveId) throw new Error('AI action needs objectiveId');
+				const updates: Record<string, unknown> = {};
+				if (asString(action.payload.title)) updates.title = asString(action.payload.title);
+				if ('description' in action.payload) updates.description = asString(action.payload.description) || null;
+				if ('weight' in action.payload) updates.weight = asNumber(action.payload.weight, 1);
+				if ('colorIndex' in action.payload) updates.colorIndex = asNumber(action.payload.colorIndex, 0);
+
+				const response = await fetch(`/api/objectives/${objectiveId}`, {
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(updates)
+				});
+				if (!response.ok) {
+					const result = await response.json();
+					throw new Error(result.error || 'Failed to update objective from AI action');
+				}
+				await invalidateAll();
+			} else if (action.type === 'delete_objective') {
+				const objectiveId = asString(action.payload.objectiveId);
+				if (!objectiveId) throw new Error('AI action needs objectiveId');
+				const response = await fetch(`/api/objectives/${objectiveId}`, { method: 'DELETE' });
+				if (!response.ok) throw new Error('Failed to delete objective from AI action');
+				await invalidateAll();
+			} else if (action.type === 'add_key_result') {
+				const objectiveId = asString(action.payload.objectiveId) || (localObjectives.length === 1 ? localObjectives[0].id : '');
+				if (!objectiveId) throw new Error('AI needs an objectiveId to add a key result');
+				await createKeyResultFromAi(objectiveId, action.payload);
+				await invalidateAll();
+			} else if (action.type === 'update_key_result') {
+				const objectiveId = asString(action.payload.objectiveId);
+				const krId = asString(action.payload.krId);
+				await updateKeyResultFromAi(objectiveId, krId, action.payload);
+				await invalidateAll();
+			} else if (action.type === 'delete_key_result') {
+				const objectiveId = asString(action.payload.objectiveId);
+				const krId = asString(action.payload.krId);
+				if (!objectiveId || !krId) throw new Error('AI action needs objectiveId and krId');
+				const response = await fetch(`/api/objectives/${objectiveId}/key-results/${krId}`, { method: 'DELETE' });
+				if (!response.ok) throw new Error('Failed to delete key result from AI action');
+				await invalidateAll();
+			} else if (action.type === 'draft_reflection') {
+				const reflection = asString(action.payload.reflection);
+				if (!reflection) throw new Error('AI action is missing reflection text');
+				handleReflectionChange(reflection);
+			} else if (action.type === 'save_reflection') {
+				const reflection = asString(action.payload.reflection);
+				if (!reflection) throw new Error('AI action is missing reflection text');
+				await saveReflectionFromAi(reflection);
+			} else {
+				throw new Error(`Unsupported AI action: ${action.type}`);
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to apply AI action';
+		}
 	}
 
 	async function saveReflection() {
@@ -633,6 +851,54 @@
 	{#if error}
 		<div class="error-banner">{error}</div>
 	{/if}
+
+	<section class="card ai-assistant-section">
+		<div class="section-header">
+			<h2 class="section-title">AI Assistant</h2>
+			<button class="btn btn-secondary btn-sm" onclick={() => showAiAssistant = !showAiAssistant}>
+				{showAiAssistant ? 'Hide' : 'Open'}
+			</button>
+		</div>
+		{#if showAiAssistant}
+			<div class="ai-chat-shell">
+				<AiChat
+					hasConfig={data.aiConfig?.hasAiConfig ?? false}
+					configuredProviders={data.aiConfig?.configuredProviders ?? []}
+					activeProvider={data.aiConfig?.activeProvider ?? 'anthropic'}
+					providerModels={data.aiConfig?.providerModels ?? {}}
+					context="objectives"
+					contextData={{
+						view: { level: data.level, year: data.year, month: data.month },
+						objectives: localObjectives.map((objective) => ({
+							id: objective.id,
+							title: objective.title,
+							description: objective.description,
+							weight: objective.weight,
+							keyResults: objective.keyResults.map((kr) => ({
+								id: kr.id,
+								title: kr.title,
+								details: kr.details,
+								weight: kr.weight,
+								expectedHours: kr.expectedHours,
+								measurementType: kr.measurementType,
+								checkboxItems: kr.checkboxItems,
+								progressQueryId: kr.progressQueryId,
+								progressQueryCode: kr.progressQueryCode
+							}))
+						})),
+						savedQueries: data.savedQueries.map((query) => ({
+							id: query.id,
+							name: query.name,
+							code: query.code
+						})),
+						reflection: reflectionText
+					}}
+					onAction={handleAiAction}
+					welcomeText="Ask me to draft objectives, key results, or reflections for this period."
+				/>
+			</div>
+		{/if}
+	</section>
 
 	<div class="overall-score card">
 		<CircularProgress value={localOverallScore} size={120} strokeWidth={8} />
@@ -1282,6 +1548,30 @@
 
 	.new-objective-form h3 {
 		margin: 0 0 var(--spacing-md);
+	}
+
+	.ai-assistant-section {
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.ai-assistant-section .section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--spacing-md);
+		margin-bottom: var(--spacing-md);
+	}
+
+	.ai-assistant-section .section-title {
+		margin: 0;
+		font-size: 1rem;
+	}
+
+	.ai-chat-shell {
+		height: 520px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
 	}
 
 	.textarea {

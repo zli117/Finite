@@ -10,8 +10,7 @@ import { eq, desc } from 'drizzle-orm';
 import defaultPromptMd from './default-prompt.md?raw';
 import apiReferenceMd from '../../../../docs/QUERY_API_REFERENCE.md?raw';
 import { getPlugin } from '$lib/server/plugins/manager';
-
-export type AiChatContext = 'query' | 'kr_progress' | 'widget' | 'metric';
+import type { AiChatContext } from '$lib/ai/types';
 
 export const CONTEXT_ADDENDA: Record<AiChatContext, string> = {
 	query: '',
@@ -65,6 +64,86 @@ The user is writing a JavaScript expression for a computed metric in their daily
 - Sleep in minutes: \`q.parseTime(metrics.sleep_length)\`
 - Formatted sleep: \`q.formatDuration(q.parseTime(metrics.sleep_length))\`
 - Caffeine warning: \`metrics.caffeine_cups > 3 ? "Too much!" : "OK"\`
+`,
+	objectives: `
+## Context: Objectives and Key Results
+
+The user is planning objectives, key results, and reflections. Help them think clearly, keep OKRs measurable, and prefer concrete next actions over vague ambition.
+
+When you want the interface to apply a change, return exactly one or more action blocks:
+
+\`<ruok-action type="create_objective" label="Create objective">{"title":"...","description":"...","weight":1,"colorIndex":0,"keyResults":[{"title":"...","details":"...","weight":1,"expectedHours":2,"measurementType":"checkboxes","checkboxItems":["..."]}]}</ruok-action>\`
+\`<ruok-action type="update_objective" label="Update objective">{"objectiveId":"...","title":"...","description":"...","weight":1,"colorIndex":0}</ruok-action>\`
+\`<ruok-action type="delete_objective" label="Delete objective">{"objectiveId":"..."}</ruok-action>\`
+\`<ruok-action type="add_key_result" label="Add key result">{"objectiveId":"...","title":"...","details":"...","weight":1,"expectedHours":2,"measurementType":"checkboxes","checkboxItems":["..."]}</ruok-action>\`
+\`<ruok-action type="add_key_result" label="Add custom query KR">{"objectiveId":"...","title":"...","details":"...","weight":1,"expectedHours":2,"measurementType":"custom_query","progressQueryCode":"const days = await q.daily({ year: 2026 });\\nprogress.set(days.length, 365);"}</ruok-action>\`
+\`<ruok-action type="update_key_result" label="Update key result">{"objectiveId":"...","krId":"...","title":"...","details":"...","weight":1,"expectedHours":2,"measurementType":"custom_query","progressQueryCode":"..."}</ruok-action>\`
+\`<ruok-action type="delete_key_result" label="Delete key result">{"objectiveId":"...","krId":"..."}</ruok-action>\`
+\`<ruok-action type="draft_reflection" label="Draft reflection">{"reflection":"..."}</ruok-action>\`
+\`<ruok-action type="save_reflection" label="Save reflection">{"reflection":"..."}</ruok-action>\`
+
+Rules:
+- Use an existing objectiveId when adding a key result. If unsure, ask which objective.
+- Keep key result checkbox items short and directly completable.
+- For custom-query KRs, put the complete runnable progress calculation in \`progressQueryCode\`; do not ask the user to paste code.
+- Custom-query KR code MUST call \`progress.set(numerator, denominator)\` and must be scoped to the current objective view.
+- Do not say an action has been applied; the user must press Apply.
+`,
+	daily_plan: `
+## Context: Daily Planning
+
+The user is planning a single day. Help produce realistic task lists, journal drafts, and small adjustments.
+
+When you want the interface to apply a change, return exactly one or more action blocks:
+
+\`<ruok-action type="add_daily_tasks" label="Add daily tasks">{"tasks":[{"title":"...","expectedHours":1,"tagNames":["..."]}]}</ruok-action>\`
+\`<ruok-action type="update_task" label="Update task">{"taskId":"...","title":"...","completed":false,"expectedHours":1,"tagNames":["..."]}</ruok-action>\`
+\`<ruok-action type="toggle_task" label="Toggle task">{"taskId":"..."}</ruok-action>\`
+\`<ruok-action type="delete_task" label="Delete task">{"taskId":"..."}</ruok-action>\`
+\`<ruok-action type="draft_journal" label="Draft journal">{"journal":"..."}</ruok-action>\`
+\`<ruok-action type="save_journal" label="Save journal">{"journal":"..."}</ruok-action>\`
+
+Rules:
+- Keep task titles actionable and concise.
+- Prefer a small number of tasks with plausible expectedHours.
+- Do not say tasks or journal text have been applied; the user must press Apply.
+`,
+	weekly_plan: `
+## Context: Weekly Planning
+
+The user is planning weekly initiatives and reviewing the week. Help create initiatives that fit the visible days and current workload.
+
+When you want the interface to apply a change, return exactly one or more action blocks:
+
+\`<ruok-action type="add_weekly_initiatives" label="Add initiatives">{"initiatives":[{"title":"...","expectedHours":3,"tagNames":["..."]}]}</ruok-action>\`
+\`<ruok-action type="update_initiative" label="Update initiative">{"taskId":"...","title":"...","completed":false,"expectedHours":3,"tagNames":["..."]}</ruok-action>\`
+\`<ruok-action type="toggle_initiative" label="Toggle initiative">{"taskId":"..."}</ruok-action>\`
+\`<ruok-action type="delete_initiative" label="Delete initiative">{"taskId":"..."}</ruok-action>\`
+
+Rules:
+- Initiatives should be larger than daily tasks but still finishable in the week.
+- Use the user's existing tags when possible.
+- Do not say initiatives have been applied; the user must press Apply.
+`,
+	metrics_template: `
+## Context: Metrics Template Design
+
+The user is designing daily metrics. Help create useful input, computed, and external metrics.
+
+When you want the interface to apply a change, return exactly one or more action blocks:
+
+\`<ruok-action type="add_metric" label="Add metric">{"metric":{"name":"sleep_duration","label":"Sleep Duration","type":"input","inputType":"time","unit":"hours"}}</ruok-action>\`
+\`<ruok-action type="update_metric" label="Update metric">{"index":0,"metric":{"name":"sleep_duration","label":"Sleep Duration","type":"input","inputType":"time","unit":"hours"}}</ruok-action>\`
+\`<ruok-action type="remove_metric" label="Remove metric">{"index":0}</ruok-action>\`
+\`<ruok-action type="move_metric" label="Move metric">{"fromIndex":2,"toIndex":0}</ruok-action>\`
+\`<ruok-action type="replace_metrics" label="Replace metric list">{"metrics":[{"name":"...","label":"...","type":"input","inputType":"number","unit":"..."}]}</ruok-action>\`
+\`<ruok-action type="update_template_details" label="Update template details">{"name":"default","effectiveFrom":"2026-05-11"}</ruok-action>\`
+
+Rules:
+- Metric names must be stable snake_case identifiers.
+- Computed metrics may only reference metrics above them through \`metrics.metric_name\`.
+- External metrics must use one of the available source ids from the screen state.
+- Do not say metrics have been applied; the user must press Apply.
 `
 };
 
@@ -125,6 +204,10 @@ export async function buildSystemPrompt(userId: string, context: AiChatContext =
 		} else {
 			prompt += `\n## Available Metrics\n\nNo metrics are defined above this one. This is the first metric in the template, so \`metrics.*\` will be empty.\n`;
 		}
+	}
+
+	if (['objectives', 'daily_plan', 'weekly_plan', 'metrics_template'].includes(context) && contextData) {
+		prompt += `\n## Current Screen State\n\nUse this JSON as the user's current visible interface state. Do not invent ids; only reference ids that appear here.\n\n\`\`\`json\n${JSON.stringify(contextData, null, 2)}\n\`\`\`\n`;
 	}
 
 	return prompt;

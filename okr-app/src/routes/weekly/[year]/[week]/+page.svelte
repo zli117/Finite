@@ -2,11 +2,14 @@
 	import { goto, invalidateAll } from '$app/navigation';
 	import TaskList from '$lib/components/TaskList.svelte';
 	import TaskForm from '$lib/components/TaskForm.svelte';
+	import AiChat from '$lib/components/AiChat.svelte';
 	import type { Task, Tag } from '$lib/types';
+	import type { AiAction } from '$lib/ai/types';
 
 	let { data } = $props();
 
 	let error = $state('');
+	let showAiAssistant = $state(false);
 
 	// Store local tags state for inline creation
 	let localTags = $state<Tag[]>([]);
@@ -22,6 +25,18 @@
 
 	function handleError(message: string) {
 		error = message;
+	}
+
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === 'object' && value !== null && !Array.isArray(value);
+	}
+
+	function asString(value: unknown): string {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function asNumber(value: unknown): number | null {
+		return typeof value === 'number' && Number.isFinite(value) ? value : null;
 	}
 
 	async function handleTaskSuccess() {
@@ -49,6 +64,23 @@
 			error = err instanceof Error ? err.message : 'Failed to create tag';
 			return null;
 		}
+	}
+
+	async function resolveTagIds(tagNames: unknown): Promise<string[]> {
+		if (!Array.isArray(tagNames)) return [];
+		const ids: string[] = [];
+		for (const rawName of tagNames) {
+			const name = asString(rawName);
+			if (!name) continue;
+			const existing = localTags.find((tag) => tag.name.toLowerCase() === name.toLowerCase());
+			if (existing) {
+				ids.push(existing.id);
+				continue;
+			}
+			const created = await createTag(name);
+			if (created) ids.push(created.id);
+		}
+		return ids;
 	}
 
 	// ISO week number (Monday-first, week 1 contains Jan 4)
@@ -206,6 +238,108 @@
 		}
 	}
 
+	async function createInitiativeFromAi(periodId: string, payload: Record<string, unknown>) {
+		const title = asString(payload.title);
+		if (!title) throw new Error('AI action is missing an initiative title');
+
+		const attributes: Record<string, string> = {};
+		const expectedHours = asNumber(payload.expectedHours);
+		if (expectedHours !== null && expectedHours > 0) {
+			attributes.expected_hours = String(expectedHours);
+		}
+
+		const response = await fetch('/api/tasks', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				timePeriodId: periodId,
+				title,
+				attributes: Object.keys(attributes).length > 0 ? attributes : undefined,
+				tagIds: await resolveTagIds(payload.tagNames)
+			})
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to create initiative from AI action');
+		}
+	}
+
+	function findInitiative(taskId: string): Task | undefined {
+		return data.weeklyInitiatives.find((task: Task) => task.id === taskId);
+	}
+
+	async function updateInitiativeFromAi(payload: Record<string, unknown>) {
+		const taskId = asString(payload.taskId);
+		if (!taskId) throw new Error('AI action needs taskId');
+
+		const existing = findInitiative(taskId);
+		const attributes = { ...(existing?.attributes ?? {}) };
+		if ('expectedHours' in payload) {
+			const expectedHours = asNumber(payload.expectedHours);
+			if (expectedHours !== null && expectedHours > 0) {
+				attributes.expected_hours = String(expectedHours);
+			} else {
+				delete attributes.expected_hours;
+			}
+		}
+
+		const updates: Partial<Task> & { tagIds?: string[] } = {};
+		const title = asString(payload.title);
+		if (title) updates.title = title;
+		if (typeof payload.completed === 'boolean') updates.completed = payload.completed;
+		if ('expectedHours' in payload) updates.attributes = attributes;
+		if ('tagNames' in payload) updates.tagIds = await resolveTagIds(payload.tagNames);
+
+		const response = await fetch(`/api/tasks/${taskId}`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(updates)
+		});
+
+		if (!response.ok) {
+			const result = await response.json();
+			throw new Error(result.error || 'Failed to update initiative from AI action');
+		}
+	}
+
+	async function handleAiAction(action: AiAction) {
+		error = '';
+		if (!isRecord(action.payload)) {
+			error = 'AI action payload must be an object';
+			return;
+		}
+
+		try {
+			if (action.type === 'add_weekly_initiatives') {
+				if (!Array.isArray(action.payload.initiatives)) throw new Error('AI action is missing initiatives');
+				const periodId = await getOrCreateWeeklyPeriod();
+				if (!periodId) throw new Error('No weekly period available');
+				for (const initiative of action.payload.initiatives) {
+					if (isRecord(initiative)) {
+						await createInitiativeFromAi(periodId, initiative);
+					}
+				}
+				await invalidateAll();
+			} else if (action.type === 'update_initiative') {
+				await updateInitiativeFromAi(action.payload);
+				await invalidateAll();
+			} else if (action.type === 'toggle_initiative') {
+				const taskId = asString(action.payload.taskId);
+				if (!taskId) throw new Error('AI action needs taskId');
+				await toggleInitiative(taskId);
+			} else if (action.type === 'delete_initiative') {
+				const taskId = asString(action.payload.taskId);
+				if (!taskId) throw new Error('AI action needs taskId');
+				await deleteInitiative(taskId);
+			} else {
+				throw new Error(`Unsupported AI action: ${action.type}`);
+			}
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to apply AI action';
+		}
+	}
+
 	const initiativeCompletionPercent = $derived(
 		data.stats.totalInitiatives > 0
 			? Math.round((data.stats.completedInitiatives / data.stats.totalInitiatives) * 100)
@@ -273,6 +407,51 @@
 	{#if error}
 		<div class="error-banner">{error}</div>
 	{/if}
+
+	<section class="card ai-assistant-section">
+		<div class="section-header">
+			<h2 class="section-title">AI Assistant</h2>
+			<button class="btn btn-secondary btn-sm" onclick={() => showAiAssistant = !showAiAssistant}>
+				{showAiAssistant ? 'Hide' : 'Open'}
+			</button>
+		</div>
+		{#if showAiAssistant}
+			<div class="ai-chat-shell">
+				<AiChat
+					hasConfig={data.aiConfig?.hasAiConfig ?? false}
+					configuredProviders={data.aiConfig?.configuredProviders ?? []}
+					activeProvider={data.aiConfig?.activeProvider ?? 'anthropic'}
+					providerModels={data.aiConfig?.providerModels ?? {}}
+					context="weekly_plan"
+					contextData={{
+						week: { year: data.year, week: data.week, weekStartDay: data.weekStartDay },
+						initiatives: data.weeklyInitiatives.map((task: Task) => ({
+							id: task.id,
+							title: task.title,
+							completed: task.completed,
+							expectedHours: task.attributes?.expected_hours,
+							tagIds: task.tagIds
+						})),
+						days: data.days.map((day: { date: string; dayName: string; tasks: Task[] }) => ({
+							date: day.date,
+							dayName: day.dayName,
+							tasks: day.tasks.map((task: Task) => ({
+								id: task.id,
+								title: task.title,
+								completed: task.completed,
+								expectedHours: task.attributes?.expected_hours,
+								tagIds: task.tagIds
+							}))
+						})),
+						stats: data.stats,
+						tags: localTags.map((tag) => ({ id: tag.id, name: tag.name, category: tag.category }))
+					}}
+					onAction={handleAiAction}
+					welcomeText="Ask me to create weekly initiatives or rebalance this week."
+				/>
+			</div>
+		{/if}
+	</section>
 
 	<!-- Weekly Initiatives Section -->
 	<section class="card initiatives-section">
@@ -542,6 +721,17 @@
 	/* Weekly Initiatives Section */
 	.initiatives-section {
 		margin-bottom: var(--spacing-lg);
+	}
+
+	.ai-assistant-section {
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.ai-chat-shell {
+		height: 520px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
 	}
 
 	.section-header {

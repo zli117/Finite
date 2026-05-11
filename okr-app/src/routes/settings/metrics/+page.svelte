@@ -2,6 +2,8 @@
 	import { invalidateAll } from '$app/navigation';
 	import type { MetricDefinition } from '$lib/db/schema';
 	import CodeEditorModal from '$lib/components/CodeEditorModal.svelte';
+	import AiChat from '$lib/components/AiChat.svelte';
+	import type { AiAction } from '$lib/ai/types';
 
 	let { data } = $props();
 
@@ -18,6 +20,7 @@
 	});
 
 	let showNewTemplate = $state(false);
+	let showAiAssistant = $state(false);
 	let editingTemplate = $state<typeof data.templates[0] | null>(null);
 	let loading = $state(false);
 	let message = $state<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -113,6 +116,115 @@
 
 	function removeMetric(index: number) {
 		metrics = metrics.filter((_, i) => i !== index);
+	}
+
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return typeof value === 'object' && value !== null && !Array.isArray(value);
+	}
+
+	function asString(value: unknown): string {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function asIndex(value: unknown): number | null {
+		return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+	}
+
+	function normalizeMetric(value: unknown): MetricDefinition | null {
+		if (!isRecord(value)) return null;
+		const name = asString(value.name);
+		const label = asString(value.label);
+		const type = value.type;
+		if (!name || !label || (type !== 'input' && type !== 'computed' && type !== 'external')) {
+			return null;
+		}
+
+		const metric: MetricDefinition = { name, label, type };
+		if (type === 'input') {
+			const inputType = value.inputType;
+			metric.inputType = inputType === 'time' || inputType === 'text' || inputType === 'boolean' ? inputType : 'number';
+			const unit = asString(value.unit);
+			if (unit) metric.unit = unit;
+		} else if (type === 'computed') {
+			metric.expression = asString(value.expression);
+		} else if (type === 'external') {
+			metric.source = asString(value.source);
+		}
+		return metric;
+	}
+
+	async function handleAiAction(action: AiAction) {
+		message = null;
+		if (!isRecord(action.payload)) {
+			message = { type: 'error', text: 'AI action payload must be an object' };
+			return;
+		}
+
+		if (action.type === 'add_metric') {
+			const metric = normalizeMetric(action.payload.metric);
+			if (!metric) {
+				message = { type: 'error', text: 'AI action is missing a valid metric' };
+				return;
+			}
+			metrics = [...metrics, metric];
+			message = { type: 'success', text: 'Metric added from AI' };
+		} else if (action.type === 'update_metric') {
+			const index = asIndex(action.payload.index);
+			const metric = normalizeMetric(action.payload.metric);
+			if (index === null || index >= metrics.length || !metric) {
+				message = { type: 'error', text: 'AI action needs a valid metric index and metric' };
+				return;
+			}
+			metrics = metrics.map((current, i) => (i === index ? metric : current));
+			message = { type: 'success', text: 'Metric updated from AI' };
+		} else if (action.type === 'remove_metric') {
+			const index = asIndex(action.payload.index);
+			if (index === null || index >= metrics.length) {
+				message = { type: 'error', text: 'AI action needs a valid metric index' };
+				return;
+			}
+			metrics = metrics.filter((_, i) => i !== index);
+			message = { type: 'success', text: 'Metric removed from AI' };
+		} else if (action.type === 'move_metric') {
+			const fromIndex = asIndex(action.payload.fromIndex);
+			const toIndex = asIndex(action.payload.toIndex);
+			if (
+				fromIndex === null ||
+				toIndex === null ||
+				fromIndex >= metrics.length ||
+				toIndex >= metrics.length
+			) {
+				message = { type: 'error', text: 'AI action needs valid fromIndex and toIndex' };
+				return;
+			}
+			const nextMetrics = [...metrics];
+			const [metric] = nextMetrics.splice(fromIndex, 1);
+			nextMetrics.splice(toIndex, 0, metric);
+			metrics = nextMetrics;
+			message = { type: 'success', text: 'Metric moved from AI' };
+		} else if (action.type === 'replace_metrics') {
+			if (!Array.isArray(action.payload.metrics)) {
+				message = { type: 'error', text: 'AI action is missing metrics' };
+				return;
+			}
+			const nextMetrics = action.payload.metrics
+				.map(normalizeMetric)
+				.filter((metric): metric is MetricDefinition => metric !== null);
+			if (nextMetrics.length === 0) {
+				message = { type: 'error', text: 'AI action did not include any valid metrics' };
+				return;
+			}
+			metrics = nextMetrics;
+			message = { type: 'success', text: 'Metrics replaced from AI' };
+		} else if (action.type === 'update_template_details') {
+			const name = asString(action.payload.name);
+			const nextEffectiveFrom = asString(action.payload.effectiveFrom);
+			if (name) templateName = name;
+			if (/^\d{4}-\d{2}-\d{2}$/.test(nextEffectiveFrom)) effectiveFrom = nextEffectiveFrom;
+			message = { type: 'success', text: 'Template details updated from AI' };
+		} else {
+			message = { type: 'error', text: `Unsupported AI action: ${action.type}` };
+		}
 	}
 
 	function moveMetricUp(index: number) {
@@ -229,6 +341,34 @@
 	{#if showNewTemplate}
 		<div class="card template-form">
 			<h2>{editingTemplate ? 'Edit Template' : 'New Template'}</h2>
+
+			<div class="ai-assistant-section">
+				<div class="section-header">
+					<h3>AI Assistant</h3>
+					<button type="button" class="btn btn-secondary btn-sm" onclick={() => showAiAssistant = !showAiAssistant}>
+						{showAiAssistant ? 'Hide' : 'Open'}
+					</button>
+				</div>
+				{#if showAiAssistant}
+					<div class="ai-chat-shell">
+						<AiChat
+							hasConfig={aiConfig.hasAiConfig}
+							configuredProviders={aiConfig.configuredProviders}
+							activeProvider={aiConfig.activeProvider}
+							providerModels={aiConfig.providerModels}
+							context="metrics_template"
+							contextData={{
+								templateName,
+								effectiveFrom,
+								metrics,
+								externalSources: data.externalSources
+							}}
+							onAction={handleAiAction}
+							welcomeText="Ask me to design or revise this metrics template."
+						/>
+					</div>
+				{/if}
+			</div>
 
 			<div class="form-row">
 				<div class="form-group">
@@ -514,6 +654,33 @@
 
 	.template-form h2 {
 		margin: 0 0 var(--spacing-md);
+	}
+
+	.ai-assistant-section {
+		padding: var(--spacing-md);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		margin-bottom: var(--spacing-lg);
+	}
+
+	.ai-assistant-section .section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--spacing-md);
+		margin-bottom: var(--spacing-md);
+	}
+
+	.ai-assistant-section h3 {
+		margin: 0;
+		font-size: 1rem;
+	}
+
+	.ai-chat-shell {
+		height: 520px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-md);
+		overflow: hidden;
 	}
 
 	.form-row {

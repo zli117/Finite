@@ -4,7 +4,8 @@ import { db } from '$lib/db/client';
 import { userAiConfig } from '$lib/db/schema';
 import { eq } from 'drizzle-orm';
 import { sendMessage, PROVIDER_DEFAULTS, type AiMessage, type AiProvider } from '$lib/server/ai/providers';
-import { buildSystemPrompt, type AiChatContext } from '$lib/server/ai/system-prompt';
+import { buildSystemPrompt } from '$lib/server/ai/system-prompt';
+import type { AiChatContext } from '$lib/ai/types';
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) {

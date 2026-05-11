@@ -61,7 +61,11 @@ export const load: PageServerLoad = async ({ locals }) => {
 			query: CONTEXT_ADDENDA.query || '(no additional instructions)',
 			kr_progress: CONTEXT_ADDENDA.kr_progress,
 			widget: CONTEXT_ADDENDA.widget,
-			metric: CONTEXT_ADDENDA.metric
+			metric: CONTEXT_ADDENDA.metric,
+			objectives: CONTEXT_ADDENDA.objectives,
+			daily_plan: CONTEXT_ADDENDA.daily_plan,
+			weekly_plan: CONTEXT_ADDENDA.weekly_plan,
+			metrics_template: CONTEXT_ADDENDA.metrics_template
 		}
 	};
 };

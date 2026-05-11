@@ -17,11 +17,10 @@ import {
 	executeTool,
 	getUserToolContext,
 	type ToolCall,
-	type ToolCallResult,
-	type PageContext
+	type ToolCallResult
 } from '$lib/server/ai/tools';
 
-const MAX_AGENT_ROUNDS = 4;
+const MAX_AGENT_ROUNDS = 20;
 
 export const POST: RequestHandler = async ({ locals, request }) => {
 	if (!locals.user) {
@@ -92,65 +91,111 @@ export const POST: RequestHandler = async ({ locals, request }) => {
 		if (context === 'assistant') {
 			const ctx = await getUserToolContext(locals.user.id);
 			const workingMessages: AiMessage[] = [...messages];
-			let lastText = '';
+			// Interleaved transcript: text segments and tool-call records, in order.
+			type TranscriptStep =
+				| { type: 'text'; content: string }
+				| {
+						type: 'tool_call';
+						id: string;
+						name: string;
+						args: Record<string, unknown>;
+						ok: boolean;
+						result?: unknown;
+						error?: string;
+					};
+			const steps: TranscriptStep[] = [];
 			let pendingWrites: ToolCall[] = [];
-			const readResults: ToolCallResult[] = [];
+			let exhausted = true;
+
+			// Stop the model after each tool call so it can't speculatively emit a
+			// follow-up call before seeing the result. The stop sequence itself is
+			// NOT included in the returned content, so we re-append it before parsing.
+			const TOOL_CALL_CLOSE = '</tool_call>';
+			const stopOptions = { stopSequences: [TOOL_CALL_CLOSE] };
 
 			for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
-				const response = await sendMessage(provider, finalConfig, systemPrompt, workingMessages);
+				const response = await sendMessage(
+					provider,
+					finalConfig,
+					systemPrompt,
+					workingMessages,
+					stopOptions
+				);
 				if (response.error) return json({ error: response.error }, { status: 502 });
 
-				const calls = parseToolCalls(response.content);
-				const reads: ToolCall[] = [];
-				const writes: ToolCall[] = [];
-				for (const c of calls) {
-					const tool = TOOLS[c.name];
-					if (tool?.category === 'read') reads.push(c);
-					else writes.push(c);
+				let assistantContent = response.content;
+				if (response.stoppedOnSequence && assistantContent.includes('<tool_call')) {
+					assistantContent = assistantContent + TOOL_CALL_CLOSE;
 				}
 
-				// If no reads remain to execute, we're done — return text + any write proposals.
-				if (reads.length === 0) {
-					lastText = stripToolCalls(response.content);
-					pendingWrites = writes;
+				// Capture per-round narration so the user sees the running commentary
+				// in order, alongside the tool calls.
+				const roundText = stripToolCalls(assistantContent).trim();
+				if (roundText) steps.push({ type: 'text', content: roundText });
+
+				// Enforce one-tool-call-per-turn: only honor the first call.
+				const firstCall = parseToolCalls(assistantContent)[0];
+
+				if (!firstCall) {
+					exhausted = false;
 					break;
 				}
 
-				// Execute reads, feed results back as a user message, continue the loop.
-				// CRITICAL: discard any writes the model proposed in the same round —
-				// they were generated BEFORE it could see the read results, so any IDs
-				// they reference were either hallucinated or stale. Force the model to
-				// re-propose writes in the next round with the real data in hand.
-				const roundResults: ToolCallResult[] = [];
-				for (const c of reads) roundResults.push(await executeTool(ctx, c));
-				readResults.push(...roundResults);
+				const tool = TOOLS[firstCall.name];
 
-				workingMessages.push({ role: 'assistant', content: response.content });
-				let feedbackContent = formatToolResults(roundResults);
-				if (writes.length > 0) {
-					const ignoredList = writes
-						.map((w) => `- ${w.name} (${JSON.stringify(w.args).slice(0, 120)})`)
-						.join('\n');
-					feedbackContent +=
-						`\n\n<system_note>\nYou proposed ${writes.length} write tool call(s) in the same turn as read calls. They were NOT shown to the user and NOT executed, because they were generated before you saw the read results above — any IDs or values in them were guesses.\n\nIgnored:\n${ignoredList}\n\nIf you still want to propose these writes, do so now using the REAL ids and values from the tool_result above. Copy ids EXACTLY (full UUIDs) — never invent or shorten them.\n</system_note>`;
+				if (!tool) {
+					steps.push({
+						type: 'tool_call',
+						id: firstCall.id,
+						name: firstCall.name,
+						args: firstCall.args,
+						ok: false,
+						error: 'Unknown tool'
+					});
+					workingMessages.push({ role: 'assistant', content: assistantContent });
+					workingMessages.push({
+						role: 'user',
+						content: `<tool_result name="${firstCall.name}">\nERROR: Unknown tool. Available tools are listed in the system prompt.\n</tool_result>`
+					});
+					continue;
 				}
-				workingMessages.push({ role: 'user', content: feedbackContent });
+
+				if (tool.category === 'write') {
+					pendingWrites = [firstCall];
+					exhausted = false;
+					break;
+				}
+
+				// Read → execute, record in transcript, feed back to model.
+				const result = await executeTool(ctx, firstCall);
+				steps.push({
+					type: 'tool_call',
+					id: firstCall.id,
+					name: firstCall.name,
+					args: firstCall.args,
+					ok: result.ok,
+					result: result.result,
+					error: result.error
+				});
+				workingMessages.push({ role: 'assistant', content: assistantContent });
+				workingMessages.push({ role: 'user', content: formatToolResults([result]) });
+			}
+
+			if (exhausted) {
+				steps.push({
+					type: 'text',
+					content: `_I hit my tool-call budget (${MAX_AGENT_ROUNDS} steps) before finishing. Reply "continue" if you want me to keep going._`
+				});
 			}
 
 			return json({
-				content: lastText,
+				steps,
 				toolCalls: pendingWrites.map((c) => ({
 					id: c.id,
 					name: c.name,
 					args: c.args,
 					preview: previewFor(c),
 					category: 'write' as const
-				})),
-				readResults: readResults.map((r) => ({
-					id: r.id,
-					name: r.name,
-					ok: r.ok,
-					error: r.error
 				}))
 			});
 		}

@@ -2,6 +2,7 @@ import { db } from '$lib/db/client';
 import { tags, taskTags, tasks } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
 
 export const listTags: ToolDef = {
@@ -52,6 +53,7 @@ export const createTag: ToolDef<CreateTagArgs, { tagId: string }> = {
 			color: args.color ?? null,
 			category: args.category ?? null
 		});
+		broadcastDataChange(ctx.userId, 'data:tags');
 		return { tagId: id };
 	}
 };
@@ -91,6 +93,7 @@ export const updateTag: ToolDef<UpdateTagArgs> = {
 				category: args.category !== undefined ? args.category : existing.category
 			})
 			.where(eq(tags.id, args.tagId));
+		broadcastDataChange(ctx.userId, 'data:tags');
 		return { ok: true };
 	}
 };
@@ -115,6 +118,7 @@ export const deleteTag: ToolDef<DeleteTagArgs> = {
 		});
 		if (!existing) throw new Error('Tag not found');
 		await db.delete(tags).where(eq(tags.id, args.tagId));
+		broadcastDataChange(ctx.userId, 'data:tags', 'data:tasks');
 		return { ok: true };
 	}
 };
@@ -156,6 +160,7 @@ export const setTaskTags: ToolDef<SetTaskTagsArgs> = {
 		for (const tagId of args.tagIds) {
 			await db.insert(taskTags).values({ taskId: args.taskId, tagId });
 		}
+		broadcastDataChange(ctx.userId, 'data:tasks', 'data:weekly');
 		return { ok: true };
 	}
 };

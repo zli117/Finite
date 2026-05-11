@@ -3,6 +3,7 @@ import { savedQueries } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { executeQuery } from '$lib/server/query/executor';
+import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
 
 type QueryType = 'progress' | 'widget' | 'general';
@@ -102,6 +103,7 @@ export const createSavedQuery: ToolDef<CreateQueryArgs, { queryId: string }> = {
 			createdAt: now,
 			updatedAt: now
 		});
+		broadcastDataChange(ctx.userId, 'data:queries');
 		return { queryId: id };
 	}
 };
@@ -141,6 +143,7 @@ export const updateSavedQuery: ToolDef<UpdateQueryArgs> = {
 		if (args.code !== undefined) updates.code = args.code;
 		if (args.queryType !== undefined) updates.queryType = args.queryType;
 		await db.update(savedQueries).set(updates).where(eq(savedQueries.id, args.queryId));
+		broadcastDataChange(ctx.userId, 'data:queries');
 		return { ok: true };
 	}
 };
@@ -165,6 +168,7 @@ export const deleteSavedQuery: ToolDef<DeleteQueryArgs> = {
 		});
 		if (!existing) throw new Error('Query not found');
 		await db.delete(savedQueries).where(eq(savedQueries.id, args.queryId));
+		broadcastDataChange(ctx.userId, 'data:queries');
 		return { ok: true };
 	}
 };

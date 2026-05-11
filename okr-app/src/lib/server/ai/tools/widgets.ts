@@ -2,6 +2,7 @@ import { db } from '$lib/db/client';
 import { dashboardWidgets } from '$lib/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
+import { broadcastDataChange } from '$lib/server/events';
 import type { ToolDef } from './types';
 
 export const listDashboardWidgets: ToolDef = {
@@ -72,6 +73,7 @@ export const createDashboardWidget: ToolDef<CreateWidgetArgs, { widgetId: string
 			sortOrder: maxSort + 1,
 			page: 'dashboard'
 		});
+		broadcastDataChange(ctx.userId, 'data:dashboard');
 		return { widgetId: id };
 	}
 };
@@ -115,6 +117,7 @@ export const updateDashboardWidget: ToolDef<UpdateWidgetArgs> = {
 		}
 		if (args.sortOrder !== undefined) updates.sortOrder = args.sortOrder;
 		await db.update(dashboardWidgets).set(updates).where(eq(dashboardWidgets.id, args.widgetId));
+		broadcastDataChange(ctx.userId, 'data:dashboard');
 		return { ok: true };
 	}
 };
@@ -139,6 +142,7 @@ export const deleteDashboardWidget: ToolDef<DeleteWidgetArgs> = {
 		});
 		if (!existing) throw new Error('Widget not found');
 		await db.delete(dashboardWidgets).where(eq(dashboardWidgets.id, args.widgetId));
+		broadcastDataChange(ctx.userId, 'data:dashboard');
 		return { ok: true };
 	}
 };

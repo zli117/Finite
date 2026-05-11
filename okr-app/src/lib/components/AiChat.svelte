@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { renderMarkdown } from '$lib/sanitize';
 	import { tick } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 
 	interface ToolCallProposal {
 		id: string;
@@ -10,18 +11,23 @@
 		category: 'write';
 	}
 
-	interface ReadResultSummary {
-		id: string;
-		name: string;
-		ok: boolean;
-		error?: string;
-	}
+	type TranscriptStep =
+		| { type: 'text'; content: string }
+		| {
+				type: 'tool_call';
+				id: string;
+				name: string;
+				args: Record<string, unknown>;
+				ok: boolean;
+				result?: unknown;
+				error?: string;
+			};
 
 	interface AiMessage {
 		role: 'user' | 'assistant';
 		content: string;
+		steps?: TranscriptStep[];
 		toolCalls?: ToolCallProposal[];
-		readResults?: ReadResultSummary[];
 		toolStatus?: Record<string, 'pending' | 'applied' | 'discarded' | 'failed'>;
 		toolError?: Record<string, string>;
 	}
@@ -52,6 +58,36 @@
 	} = $props();
 
 	let messages = $state<AiMessage[]>([]);
+	let expandedSteps = $state<Record<string, boolean>>({});
+
+	function toggleStep(key: string) {
+		expandedSteps[key] = !expandedSteps[key];
+	}
+
+	function prettyJson(value: unknown): string {
+		try {
+			return JSON.stringify(value, null, 2);
+		} catch {
+			return String(value);
+		}
+	}
+
+	function summarizeArgs(args: Record<string, unknown>): string {
+		const keys = Object.keys(args);
+		if (keys.length === 0) return '';
+		const parts: string[] = [];
+		for (const k of keys.slice(0, 3)) {
+			const v = args[k];
+			let s: string;
+			if (typeof v === 'string') s = v.length > 40 ? v.slice(0, 40) + '…' : v;
+			else if (v === null || v === undefined) s = String(v);
+			else if (typeof v === 'object') s = '{…}';
+			else s = String(v);
+			parts.push(`${k}: ${s}`);
+		}
+		if (keys.length > 3) parts.push(`+${keys.length - 3}`);
+		return parts.join(' · ');
+	}
 	let inputText = $state('');
 	let loading = $state(false);
 	let error = $state('');
@@ -191,15 +227,15 @@
 			}
 
 			const assistantMsg: AiMessage = { role: 'assistant', content: result.content || '' };
+			if (Array.isArray(result.steps) && result.steps.length > 0) {
+				assistantMsg.steps = result.steps;
+			}
 			if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
 				assistantMsg.toolCalls = result.toolCalls;
 				assistantMsg.toolStatus = Object.fromEntries(
 					result.toolCalls.map((c: ToolCallProposal) => [c.id, 'pending'])
 				);
 				assistantMsg.toolError = {};
-			}
-			if (Array.isArray(result.readResults) && result.readResults.length > 0) {
-				assistantMsg.readResults = result.readResults;
 			}
 			messages = [...messages, assistantMsg];
 		} catch (err) {
@@ -226,6 +262,11 @@
 				msg.toolStatus![call.id] = 'failed';
 				msg.toolError![call.id] = result.error || 'Failed to apply';
 				messages = [...messages];
+			} else {
+				// Refresh the current page so the edit is reflected immediately.
+				// SSE already broadcasts to other tabs; this covers the originating tab
+				// without waiting for the event round-trip.
+				invalidateAll();
 			}
 		} catch (err) {
 			msg.toolStatus![call.id] = 'failed';
@@ -342,42 +383,66 @@
 					{#if message.role === 'user'}
 						<div class="message-content">{message.content}</div>
 					{:else}
-						{#if message.readResults && message.readResults.length > 0}
-							<div class="read-summary">
-								{#each message.readResults as r}
-									<span class="read-pill" class:read-pill-err={!r.ok}>
-										{r.ok ? '✓' : '✗'} {r.name}
-									</span>
-								{/each}
-							</div>
-						{/if}
-						{#each parseResponse(message.content) as block}
-							{#if block.type === 'text'}
-								<div class="message-text">
-									{@html renderMarkdown(block.content)}
-								</div>
-							{:else}
-								<div class="code-block">
-									<pre><code>{block.content}</code></pre>
-									<div class="code-actions">
-										{#if onCopyToEditor}
-											<button
-												class="btn btn-primary btn-xs"
-												onclick={() => onCopyToEditor?.(block.content)}
-											>
-												Copy to Editor
-											</button>
+						{#if message.steps && message.steps.length > 0}
+							{#each message.steps as step, stepIdx}
+								{#if step.type === 'text'}
+									{#each parseResponse(step.content) as block}
+										{#if block.type === 'text'}
+											<div class="message-text">{@html renderMarkdown(block.content)}</div>
+										{:else}
+											<div class="code-block">
+												<pre><code>{block.content}</code></pre>
+												<div class="code-actions">
+													{#if onCopyToEditor}
+														<button class="btn btn-primary btn-xs" onclick={() => onCopyToEditor?.(block.content)}>Copy to Editor</button>
+													{/if}
+													<button class="btn btn-secondary btn-xs" onclick={() => copyToClipboard(block.content)}>Copy</button>
+												</div>
+											</div>
 										{/if}
-										<button
-											class="btn btn-secondary btn-xs"
-											onclick={() => copyToClipboard(block.content)}
-										>
-											Copy
+									{/each}
+								{:else}
+									{@const stepKey = `${msgIndex}-${stepIdx}`}
+									{@const expanded = expandedSteps[stepKey]}
+									<div class="step-call" class:step-call-err={!step.ok}>
+										<button class="step-summary" onclick={() => toggleStep(stepKey)} aria-expanded={expanded}>
+											<span class="step-chevron" class:step-chevron-open={expanded}>▸</span>
+											<span class="step-icon">{step.ok ? '✓' : '✗'}</span>
+											<span class="step-name">{step.name}</span>
+											<span class="step-preview">{summarizeArgs(step.args)}</span>
 										</button>
+										{#if expanded}
+											<div class="step-body">
+												<div class="step-section">
+													<div class="step-section-label">Arguments</div>
+													<pre class="step-json">{prettyJson(step.args)}</pre>
+												</div>
+												<div class="step-section">
+													<div class="step-section-label">{step.ok ? 'Result' : 'Error'}</div>
+													<pre class="step-json">{step.ok ? prettyJson(step.result) : step.error ?? 'unknown error'}</pre>
+												</div>
+											</div>
+										{/if}
 									</div>
-								</div>
-							{/if}
-						{/each}
+								{/if}
+							{/each}
+						{:else}
+							{#each parseResponse(message.content) as block}
+								{#if block.type === 'text'}
+									<div class="message-text">{@html renderMarkdown(block.content)}</div>
+								{:else}
+									<div class="code-block">
+										<pre><code>{block.content}</code></pre>
+										<div class="code-actions">
+											{#if onCopyToEditor}
+												<button class="btn btn-primary btn-xs" onclick={() => onCopyToEditor?.(block.content)}>Copy to Editor</button>
+											{/if}
+											<button class="btn btn-secondary btn-xs" onclick={() => copyToClipboard(block.content)}>Copy</button>
+										</div>
+									</div>
+								{/if}
+							{/each}
+						{/if}
 						{#if message.toolCalls && message.toolCalls.length > 0}
 							{@const pendingCount = message.toolCalls.filter(
 								(c) => message.toolStatus?.[c.id] === 'pending'
@@ -762,29 +827,107 @@
 	}
 
 	/* Tool call cards (assistant context) */
-	.read-summary {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-		margin: 2px 0 4px;
-	}
-
-	.read-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		font-size: 0.6875rem;
-		padding: 1px 6px;
-		border-radius: 10px;
-		background: var(--color-bg);
-		color: var(--color-text-muted);
+	/* Inline tool-call step (collapsible, shown alongside text in the transcript) */
+	.step-call {
+		margin: 4px 0;
 		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		background: var(--color-bg);
+		overflow: hidden;
 	}
 
-	.read-pill-err {
-		background: #fef2f2;
-		color: var(--color-error);
+	.step-call-err {
 		border-color: #fecaca;
+		background: #fef2f2;
+	}
+
+	.step-summary {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		width: 100%;
+		padding: 4px 8px;
+		border: none;
+		background: transparent;
+		font-size: 0.75rem;
+		font-family: inherit;
+		text-align: left;
+		cursor: pointer;
+		color: var(--color-text);
+	}
+
+	.step-summary:hover {
+		background: rgb(0 0 0 / 0.03);
+	}
+
+	.step-chevron {
+		display: inline-block;
+		transition: transform 0.15s;
+		font-size: 0.625rem;
+		color: var(--color-text-muted);
+	}
+
+	.step-chevron-open {
+		transform: rotate(90deg);
+	}
+
+	.step-icon {
+		font-weight: 600;
+		color: #15803d;
+	}
+
+	.step-call-err .step-icon {
+		color: var(--color-error);
+	}
+
+	.step-name {
+		font-family: monospace;
+		font-weight: 600;
+	}
+
+	.step-preview {
+		color: var(--color-text-muted);
+		font-size: 0.6875rem;
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.step-body {
+		padding: 6px 10px 10px;
+		border-top: 1px solid var(--color-border);
+		background: var(--color-surface, white);
+	}
+
+	.step-section {
+		margin-top: 6px;
+	}
+
+	.step-section:first-child {
+		margin-top: 2px;
+	}
+
+	.step-section-label {
+		font-size: 0.625rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--color-text-muted);
+		margin-bottom: 2px;
+	}
+
+	.step-json {
+		margin: 0;
+		padding: 6px 8px;
+		background: var(--color-bg);
+		border-radius: var(--radius-sm);
+		font-size: 0.6875rem;
+		line-height: 1.4;
+		max-height: 220px;
+		overflow: auto;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
 	.tool-calls {

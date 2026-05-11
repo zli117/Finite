@@ -204,11 +204,22 @@ async function sendGeminiMessage(
 async function sendOpenRouterMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	if (!config.model) {
 		return { content: '', error: 'Model is required for OpenRouter' };
 	}
+
+	const body: Record<string, unknown> = {
+		model: config.model,
+		max_tokens: 4096,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) body.stop = options.stopSequences;
 
 	const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
 		method: 'POST',
@@ -218,14 +229,7 @@ async function sendOpenRouterMessage(
 			'HTTP-Referer': 'https://getruok.app',
 			'X-Title': 'RUOK'
 		},
-		body: JSON.stringify({
-			model: config.model,
-			max_tokens: 4096,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -235,15 +239,19 @@ async function sendOpenRouterMessage(
 		return { content: '', error: (error as { error?: { message?: string } }).error?.message || `OpenRouter error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { choices?: { message?: { content?: string } }[] }).choices?.[0]?.message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as {
+		choices?: { message?: { content?: string }; finish_reason?: string }[];
+	};
+	const text = data.choices?.[0]?.message?.content || '';
+	const stoppedOnSequence = data.choices?.[0]?.finish_reason === 'stop';
+	return { content: text, stoppedOnSequence };
 }
 
 async function sendOllamaMessage(
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	if (!config.model) {
 		return { content: '', error: 'Model is required for Ollama' };
@@ -251,17 +259,22 @@ async function sendOllamaMessage(
 
 	const baseUrl = config.baseUrl || PROVIDER_DEFAULTS.ollama.baseUrl!;
 
+	const body: Record<string, unknown> = {
+		model: config.model,
+		stream: false,
+		messages: [
+			{ role: 'system', content: systemPrompt },
+			...messages.map((m) => ({ role: m.role, content: m.content }))
+		]
+	};
+	if (options?.stopSequences?.length) {
+		body.options = { stop: options.stopSequences };
+	}
+
 	const response = await fetchWithTimeout(`${baseUrl}/api/chat`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			model: config.model,
-			stream: false,
-			messages: [
-				{ role: 'system', content: systemPrompt },
-				...messages.map((m) => ({ role: m.role, content: m.content }))
-			]
-		})
+		body: JSON.stringify(body)
 	});
 
 	if (!response.ok) {
@@ -269,9 +282,9 @@ async function sendOllamaMessage(
 		return { content: '', error: `Ollama error: ${response.status}` };
 	}
 
-	const data = await response.json();
-	const text = (data as { message?: { content?: string } }).message?.content || '';
-	return { content: text };
+	const data = (await response.json()) as { message?: { content?: string }; done_reason?: string };
+	const text = data.message?.content || '';
+	return { content: text, stoppedOnSequence: data.done_reason === 'stop' };
 }
 
 /**
@@ -281,20 +294,21 @@ export async function sendMessage(
 	provider: AiProvider,
 	config: AiProviderConfig,
 	systemPrompt: string,
-	messages: AiMessage[]
+	messages: AiMessage[],
+	options?: AiSendOptions
 ): Promise<AiResponse> {
 	try {
 		switch (provider) {
 			case 'anthropic':
-				return await sendAnthropicMessage(config, systemPrompt, messages);
+				return await sendAnthropicMessage(config, systemPrompt, messages, options);
 			case 'openai':
-				return await sendOpenAiMessage(config, systemPrompt, messages);
+				return await sendOpenAiMessage(config, systemPrompt, messages, undefined, options);
 			case 'gemini':
-				return await sendGeminiMessage(config, systemPrompt, messages);
+				return await sendGeminiMessage(config, systemPrompt, messages, options);
 			case 'openrouter':
-				return await sendOpenRouterMessage(config, systemPrompt, messages);
+				return await sendOpenRouterMessage(config, systemPrompt, messages, options);
 			case 'ollama':
-				return await sendOllamaMessage(config, systemPrompt, messages);
+				return await sendOllamaMessage(config, systemPrompt, messages, options);
 			default:
 				return { content: '', error: `Unknown provider: ${provider}` };
 		}
